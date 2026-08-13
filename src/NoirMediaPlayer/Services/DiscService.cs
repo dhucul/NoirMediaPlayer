@@ -78,6 +78,45 @@ public static class DiscService
         return null;
     }
 
+    public static bool IsAacsProtectedSource(string source)
+    {
+        if (!TryGetDiscFolder(source, "bluray", out var folder))
+        {
+            return false;
+        }
+
+        try
+        {
+            return Directory.Exists(Path.Combine(folder, "AACS"));
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool TryGetDiscFolder(string source, string expectedScheme, out string folder)
+    {
+        folder = string.Empty;
+        try
+        {
+            if (!Uri.TryCreate(source, UriKind.Absolute, out var uri) ||
+                !uri.Scheme.Equals(expectedScheme, StringComparison.OrdinalIgnoreCase) ||
+                uri.IsUnc)
+            {
+                return false;
+            }
+
+            folder = Path.GetFullPath(uri.LocalPath);
+            return Path.IsPathFullyQualified(folder);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            folder = string.Empty;
+            return false;
+        }
+    }
+
     private static string CreateDiscSource(string scheme, string folder)
     {
         var path = Path.GetFullPath(folder);

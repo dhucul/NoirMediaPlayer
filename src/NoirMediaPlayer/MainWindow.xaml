@@ -521,7 +521,7 @@
             <!-- Quick settings popover -->
             <Popup x:Name="SettingsPopup" PlacementTarget="{Binding ElementName=SettingsButton}" Placement="Bottom"
                    StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade">
-                <Border Width="324" Background="#FC11141A" BorderBrush="#FF303640" BorderThickness="1"
+                <Border Width="352" Background="#FC11141A" BorderBrush="#FF303640" BorderThickness="1"
                         CornerRadius="10" Padding="17" Margin="0,8,8,0">
                     <StackPanel>
                         <Grid Margin="0,0,0,14">
@@ -537,6 +537,23 @@
                                   Checked="Setting_Changed" Unchecked="Setting_Changed" />
                         <CheckBox x:Name="AlwaysOnTopCheckBox" Content="Keep player above other windows" Margin="0,0,0,11"
                                   Checked="Setting_Changed" Unchecked="Setting_Changed" />
+                        <Separator Background="{StaticResource LineBrush}" Margin="0,3,0,12" />
+                        <TextBlock Text="BLU-RAY AACS" Style="{StaticResource SectionLabel}" Margin="0,0,0,5" />
+                        <TextBlock x:Name="AacsStatusText" Text="AACS component not configured"
+                                   Foreground="{StaticResource MutedTextBrush}" FontSize="9" TextWrapping="Wrap" Margin="0,0,0,9" />
+                        <Grid Margin="0,0,0,11">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="8" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Button Grid.Column="0" Style="{StaticResource NoirButton}" Click="ChooseAacsLibrary_Click" Padding="8,7">
+                                <TextBlock Text="Choose alternate DLL" FontSize="9" ToolTip="Selected now; validated and applied after restarting NOIR" />
+                            </Button>
+                            <Button Grid.Column="2" Style="{StaticResource NoirButton}" Click="OpenAacsFolder_Click" Padding="8,7">
+                                <TextBlock Text="Open key folder" FontSize="9" />
+                            </Button>
+                        </Grid>
                         <Separator Background="{StaticResource LineBrush}" Margin="0,3,0,12" />
                         <Button Style="{StaticResource NoirButton}" Click="OpenSnapshotFolder_Click" Padding="10,7">
                             <StackPanel Orientation="Horizontal">

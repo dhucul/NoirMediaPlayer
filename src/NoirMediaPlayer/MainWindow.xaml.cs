@@ -34,6 +34,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _noticeTimer;
     private readonly Random _random = new();
     private readonly HashSet<string> _playlistSources = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _engineLogSync = new();
+    private readonly Queue<string> _recentDiscEngineLogs = new();
     private readonly PlayerSettings _settings;
     private readonly LibVLC _libVlc;
     private readonly VlcMediaPlayer _mediaPlayer;
@@ -49,6 +51,7 @@ public partial class MainWindow : Window
     private bool _shutdownStarted;
     private bool _shutdownComplete;
     private bool _playbackDisposed;
+    private bool _aacsLibraryRestartRequired;
     private bool _inspectorVisible = true;
     private bool _sidebarVisible = true;
     private int _currentIndex = -1;
@@ -59,7 +62,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _sourceImportCancellation;
     private CancellationTokenSource? _discScanCancellation;
     private CancellationTokenSource? _settingsSaveCancellation;
-    private CancellationTokenSource? _networkStartupCancellation;
+    private CancellationTokenSource? _playbackStartupCancellation;
     private Task? _sourceImportWorker;
     private Task? _discScanWorker;
     private Task? _settingsSaveTask;
@@ -72,9 +75,9 @@ public partial class MainWindow : Window
     private const int MaxPlaylistItems = 10_000;
     private static readonly TimeSpan ImportTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DiscScanTimeout = TimeSpan.FromSeconds(20);
-    private static readonly TimeSpan NetworkStartupTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan FileWriteTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(2);
+    private const int MaxRecentDiscEngineLogs = 24;
 
     private const uint MonitorDefaultToNearest = 2;
 
@@ -108,10 +111,10 @@ public partial class MainWindow : Window
         _settings = _settingsService.Load();
 
         Core.Initialize();
+        AacsService.Initialize(_settings.AacsLibraryPath);
         var engineOptions = new List<string>
         {
             "--no-video-title-show",
-            "--quiet",
             "--file-caching=350",
             "--network-caching=1200",
             "--disc-caching=700",
@@ -119,6 +122,7 @@ public partial class MainWindow : Window
         };
 
         _libVlc = new LibVLC(engineOptions.ToArray());
+        _libVlc.Log += LibVlc_Log;
         _mediaPlayer = new VlcMediaPlayer(_libVlc);
 
         InitializeComponent();
@@ -183,7 +187,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            CancelNetworkStartupWatchdog();
+            CancelPlaybackStartupWatchdog();
             _isPlaying = true;
             PlayPauseButton.Content = "\uE769";
             EngineStatusText.Text = "PLAYING";
@@ -205,7 +209,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            CancelNetworkStartupWatchdog();
+            CancelPlaybackStartupWatchdog();
             _isPlaying = false;
             PlayPauseButton.Content = "\uE768";
             EngineStatusText.Text = "PAUSED";
@@ -219,7 +223,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            CancelNetworkStartupWatchdog();
+            CancelPlaybackStartupWatchdog();
             _isPlaying = false;
             PlayPauseButton.Content = "\uE768";
             EngineStatusText.Text = "STOPPED";
@@ -242,9 +246,15 @@ public partial class MainWindow : Window
                 return;
             }
 
-            CancelNetworkStartupWatchdog();
+            CancelPlaybackStartupWatchdog();
             _isPlaying = false;
             PlayPauseButton.Content = "\uE768";
+            if (_currentItem?.IsDisc == true)
+            {
+                HandleDiscPlaybackFailure(_currentItem, timedOut: false);
+                return;
+            }
+
             EngineStatusText.Text = "PLAYBACK ERROR";
             EngineStatusDot.Fill = Brushes.OrangeRed;
             StatusText.Text = "This source could not be played";
@@ -291,6 +301,56 @@ public partial class MainWindow : Window
         };
     }
 
+    private void LibVlc_Log(object? sender, LogEventArgs args)
+    {
+        Debug.WriteLine(args.FormattedLog);
+        var module = args.Module ?? string.Empty;
+        var message = args.Message ?? string.Empty;
+        if (!module.Contains("bluray", StringComparison.OrdinalIgnoreCase) &&
+            !module.Contains("aacs", StringComparison.OrdinalIgnoreCase) &&
+            !message.Contains("bluray", StringComparison.OrdinalIgnoreCase) &&
+            !message.Contains("blu-ray", StringComparison.OrdinalIgnoreCase) &&
+            !message.Contains("aacs", StringComparison.OrdinalIgnoreCase) &&
+            !message.Contains("processing key", StringComparison.OrdinalIgnoreCase) &&
+            !message.Contains("volume key", StringComparison.OrdinalIgnoreCase) &&
+            !message.Contains("host certificate", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var entry = string.IsNullOrWhiteSpace(module) ? message : $"{module}: {message}";
+        entry = string.Join(' ', entry.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (entry.Length > 320)
+        {
+            entry = entry[..320];
+        }
+
+        lock (_engineLogSync)
+        {
+            _recentDiscEngineLogs.Enqueue(entry);
+            while (_recentDiscEngineLogs.Count > MaxRecentDiscEngineLogs)
+            {
+                _recentDiscEngineLogs.Dequeue();
+            }
+        }
+    }
+
+    private void ClearDiscEngineLogs()
+    {
+        lock (_engineLogSync)
+        {
+            _recentDiscEngineLogs.Clear();
+        }
+    }
+
+    private string GetLatestDiscEngineLog()
+    {
+        lock (_engineLogSync)
+        {
+            return _recentDiscEngineLogs.LastOrDefault() ?? string.Empty;
+        }
+    }
+
     private void DetachPlaybackEvents()
     {
         _detachPlaybackEvents?.Invoke();
@@ -307,6 +367,16 @@ public partial class MainWindow : Window
         if (launchFiles.Contains("--smoke-test", StringComparer.OrdinalIgnoreCase))
         {
             StatusText.Text = "Startup smoke test passed";
+            Environment.ExitCode = 0;
+            _ = Dispatcher.BeginInvoke(Close, DispatcherPriority.ApplicationIdle);
+            return;
+        }
+
+        if (launchFiles.Contains("--aacs-smoke-test", StringComparer.OrdinalIgnoreCase))
+        {
+            var aacsStatus = AacsService.CurrentStatus;
+            StatusText.Text = aacsStatus.IsReady ? "AACS smoke test passed" : aacsStatus.Message;
+            Environment.ExitCode = aacsStatus.IsReady ? 0 : 3;
             _ = Dispatcher.BeginInvoke(Close, DispatcherPriority.ApplicationIdle);
             return;
         }
@@ -341,7 +411,7 @@ public partial class MainWindow : Window
         _sourceImportCancellation?.Cancel();
         _discScanCancellation?.Cancel();
         _settingsSaveCancellation?.Cancel();
-        CancelNetworkStartupWatchdog();
+        CancelPlaybackStartupWatchdog();
         _uiTimer.Stop();
         _noticeTimer.Stop();
         DisposePlaybackResources();
@@ -395,6 +465,7 @@ public partial class MainWindow : Window
         ReleaseCurrentMedia();
         VideoView.MediaPlayer = null;
         _mediaPlayer.Dispose();
+        _libVlc.Log -= LibVlc_Log;
         _libVlc.Dispose();
     }
 
@@ -409,6 +480,7 @@ public partial class MainWindow : Window
         AutoPlayNextCheckBox.IsChecked = _settings.AutoPlayNext;
         HardwareDecodingCheckBox.IsChecked = _settings.HardwareDecoding;
         AlwaysOnTopCheckBox.IsChecked = _settings.AlwaysOnTop;
+        UpdateAacsStatus();
 
         ShuffleButton.Foreground = _settings.Shuffle
             ? FindBrush("AccentBrush", Brushes.DarkSeaGreen)
@@ -484,8 +556,10 @@ public partial class MainWindow : Window
             }
 
             var item = DiscService.CreateItem(discs[0]);
-            AddItem(item, playNow: true);
-            ShowNotice($"Opening {discs[0].DisplayName}");
+            if (AddItem(item, playNow: true))
+            {
+                ShowNotice($"Opening {discs[0].DisplayName}");
+            }
         }
         catch (OperationCanceledException)
         {
@@ -749,7 +823,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void AddItem(PlaylistItem item, bool playNow)
+    private bool AddItem(PlaylistItem item, bool playNow)
     {
         var existing = _playlist.FirstOrDefault(candidate =>
             string.Equals(candidate.Source, item.Source, StringComparison.OrdinalIgnoreCase));
@@ -759,7 +833,7 @@ public partial class MainWindow : Window
             if (_playlist.Count >= MaxPlaylistItems)
             {
                 ShowNotice($"Queue limit reached ({MaxPlaylistItems:N0} items)");
-                return;
+                return false;
             }
 
             _playlistSources.Add(item.Source);
@@ -770,15 +844,17 @@ public partial class MainWindow : Window
         RefreshQueueState();
         if (playNow)
         {
-            PlayItem(existing);
+            return PlayItem(existing);
         }
+
+        return true;
     }
 
-    private void PlayItem(PlaylistItem item, bool allowResume = true, long requestedPosition = -1)
+    private bool PlayItem(PlaylistItem item, bool allowResume = true, long requestedPosition = -1)
     {
         if (_isClosing || _playbackDisposed)
         {
-            return;
+            return false;
         }
 
         PersistCurrentPosition(force: true);
@@ -798,6 +874,48 @@ public partial class MainWindow : Window
         UpdateNowPlaying(item);
         SetVideoSurfaceActive(false);
 
+        if (item.IsDisc && DiscService.IsAacsProtectedSource(item.Source))
+        {
+            var aacsStatus = AacsService.CurrentStatus;
+            if (!aacsStatus.IsReady)
+            {
+                item.IsPlaying = false;
+                EngineStatusText.Text = "AACS REQUIRED";
+                EngineStatusDot.Fill = Brushes.OrangeRed;
+                StatusText.Text = aacsStatus.Message;
+                StatusDot.Fill = Brushes.OrangeRed;
+                ShowNotice("Protected Blu-ray · Configure AACS in Quick Settings");
+                MessageBox.Show(
+                    this,
+                    $"NOIR cannot load its AACS runtime.\n\n{aacsStatus.Message}\n\nYou can choose another compatible runtime in Quick Settings or use licensed Blu-ray playback software.",
+                    "AACS component required",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                UpdateAacsStatus();
+                SettingsPopup.IsOpen = true;
+                return false;
+            }
+
+            if (!aacsStatus.KeyDatabaseFound)
+            {
+                item.IsPlaying = false;
+                EngineStatusText.Text = "AACS KEY REQUIRED";
+                EngineStatusDot.Fill = Brushes.OrangeRed;
+                StatusText.Text = "Protected Blu-ray playback credentials are not configured";
+                StatusDot.Fill = Brushes.OrangeRed;
+                ShowNotice("Protected Blu-ray · KEYDB.cfg is required");
+                MessageBox.Show(
+                    this,
+                    $"NOIR cannot unlock this protected Blu-ray on its own. The AACS runtime is installed, but no playback credentials are configured.\n\nUse licensed Blu-ray playback software, or place a lawfully obtained KEYDB.cfg in:\n{AacsService.KeyDatabasePath}\n\nUse Quick Settings → Blu-ray AACS → Open key folder.",
+                    "Protected Blu-ray credentials required",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                UpdateAacsStatus();
+                SettingsPopup.IsOpen = true;
+                return false;
+            }
+        }
+
         try
         {
             _currentMedia = CreateMedia(item);
@@ -809,7 +927,7 @@ public partial class MainWindow : Window
             EngineStatusText.Text = "SOURCE ERROR";
             StatusText.Text = "The selected source is unavailable";
             ShowNotice("The selected source could not be opened");
-            return;
+            return false;
         }
         if (_rotation != 0)
         {
@@ -833,6 +951,7 @@ public partial class MainWindow : Window
         _positionPersistClock.Restart();
         AddRecent(item.Source);
         ScheduleSettingsSave();
+        ClearDiscEngineLogs();
         EngineStatusText.Text = item.IsDisc ? "READING DISC" : item.IsNetwork ? "CONNECTING" : "OPENING";
         EngineStatusDot.Fill = Brushes.Goldenrod;
         StatusText.Text = $"Opening · {item.Title}";
@@ -843,7 +962,8 @@ public partial class MainWindow : Window
                 throw new InvalidOperationException("LibVLC rejected the media source.");
             }
 
-            StartNetworkStartupWatchdog(item, generation);
+            StartPlaybackStartupWatchdog(item, generation);
+            return true;
         }
         catch (Exception exception)
         {
@@ -853,6 +973,7 @@ public partial class MainWindow : Window
             EngineStatusText.Text = "PLAYBACK ERROR";
             StatusText.Text = "The selected source could not be played";
             ShowNotice("The selected source could not be played");
+            return false;
         }
     }
 
@@ -883,7 +1004,7 @@ public partial class MainWindow : Window
             // The native player is already gone during a repeated shutdown path.
         }
 
-        CancelNetworkStartupWatchdog();
+        CancelPlaybackStartupWatchdog();
         try
         {
             _mediaPlayer.Stop();
@@ -923,27 +1044,29 @@ public partial class MainWindow : Window
         }
     }
 
-    private void StartNetworkStartupWatchdog(PlaylistItem item, long generation)
+    private void StartPlaybackStartupWatchdog(PlaylistItem item, long generation)
     {
-        CancelNetworkStartupWatchdog();
-        if (!item.IsNetwork)
+        CancelPlaybackStartupWatchdog();
+        var timeout = PlaybackStartupPolicy.GetTimeout(item.IsNetwork, item.IsDisc);
+        if (timeout is null)
         {
             return;
         }
 
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
-        _networkStartupCancellation = cancellation;
-        _ = MonitorNetworkStartupAsync(item, generation, cancellation.Token);
+        _playbackStartupCancellation = cancellation;
+        _ = MonitorPlaybackStartupAsync(item, generation, timeout.Value, cancellation.Token);
     }
 
-    private async Task MonitorNetworkStartupAsync(
+    private async Task MonitorPlaybackStartupAsync(
         PlaylistItem item,
         long generation,
+        TimeSpan timeout,
         CancellationToken cancellationToken)
     {
         try
         {
-            await Task.Delay(NetworkStartupTimeout, cancellationToken).ConfigureAwait(false);
+            await Task.Delay(timeout, cancellationToken).ConfigureAwait(false);
             if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
             {
                 return;
@@ -959,12 +1082,20 @@ public partial class MainWindow : Window
                     return;
                 }
 
-                item.IsPlaying = false;
-                ReleaseCurrentMedia();
-                EngineStatusText.Text = "CONNECTION TIMEOUT";
-                EngineStatusDot.Fill = Brushes.OrangeRed;
-                StatusText.Text = "The network stream did not respond";
-                ShowNotice("Network connection timed out");
+                if (item.IsDisc)
+                {
+                    HandleDiscPlaybackFailure(item, timedOut: true);
+                }
+                else
+                {
+                    item.IsPlaying = false;
+                    ReleaseCurrentMedia();
+                    EngineStatusText.Text = "CONNECTION TIMEOUT";
+                    EngineStatusDot.Fill = Brushes.OrangeRed;
+                    StatusText.Text = "The network stream did not respond";
+                    StatusDot.Fill = Brushes.OrangeRed;
+                    ShowNotice("Network connection timed out");
+                }
             });
         }
         catch (OperationCanceledException)
@@ -977,10 +1108,10 @@ public partial class MainWindow : Window
         }
     }
 
-    private void CancelNetworkStartupWatchdog()
+    private void CancelPlaybackStartupWatchdog()
     {
-        var cancellation = _networkStartupCancellation;
-        _networkStartupCancellation = null;
+        var cancellation = _playbackStartupCancellation;
+        _playbackStartupCancellation = null;
         if (cancellation is null)
         {
             return;
@@ -988,6 +1119,43 @@ public partial class MainWindow : Window
 
         cancellation.Cancel();
         cancellation.Dispose();
+    }
+
+    private void HandleDiscPlaybackFailure(PlaylistItem item, bool timedOut)
+    {
+        var isAacsProtected = DiscService.IsAacsProtectedSource(item.Source);
+        var aacsStatus = AacsService.CurrentStatus;
+        var engineDetail = GetLatestDiscEngineLog();
+        var failure = PlaybackStartupPolicy.DescribeDiscFailure(
+            isAacsProtected,
+            aacsStatus.KeyDatabaseFound,
+            timedOut);
+
+        item.IsPlaying = false;
+        ReleaseCurrentMedia();
+        PlayPauseButton.Content = "\uE768";
+        EngineStatusText.Text = failure.EngineStatus;
+        EngineStatusDot.Fill = Brushes.OrangeRed;
+        StatusText.Text = failure.StatusText;
+        StatusDot.Fill = Brushes.OrangeRed;
+        SetVideoSurfaceActive(false);
+        ShowNotice(failure.Notice);
+
+        var diagnostic = string.IsNullOrWhiteSpace(engineDetail)
+            ? string.Empty
+            : $"\n\nEngine detail: {engineDetail}";
+        MessageBox.Show(
+            this,
+            failure.DialogMessage + diagnostic,
+            failure.DialogTitle,
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
+
+        if (isAacsProtected)
+        {
+            UpdateAacsStatus();
+            SettingsPopup.IsOpen = true;
+        }
     }
 
     private void UpdateNowPlaying(PlaylistItem item)
@@ -1096,8 +1264,7 @@ public partial class MainWindow : Window
             }
         }
 
-        PlayItem(_playlist[nextIndex]);
-        return true;
+        return PlayItem(_playlist[nextIndex]);
     }
 
     private void HandleMediaEnded(long generation)
@@ -2160,7 +2327,95 @@ public partial class MainWindow : Window
         SidebarPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void Settings_Click(object sender, RoutedEventArgs e) => SettingsPopup.IsOpen = !SettingsPopup.IsOpen;
+    private void Settings_Click(object sender, RoutedEventArgs e)
+    {
+        UpdateAacsStatus();
+        SettingsPopup.IsOpen = !SettingsPopup.IsOpen;
+    }
+
+    private void ChooseAacsLibrary_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Choose a 64-bit libaacs library",
+            Filter = "libaacs library|libaacs.dll|Dynamic-link libraries|*.dll",
+            FileName = "libaacs.dll",
+            CheckFileExists = true,
+            Multiselect = false
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        if (!AacsService.TryNormalizeLibraryPath(dialog.FileName, out var libraryPath))
+        {
+            ShowNotice("Choose a 64-bit file named libaacs.dll");
+            return;
+        }
+
+        if (!File.Exists(libraryPath))
+        {
+            ShowNotice("Selected libaacs.dll was not found");
+            return;
+        }
+
+        _settings.AacsLibraryPath = libraryPath;
+        ScheduleSettingsSave();
+        _aacsLibraryRestartRequired = AacsService.LibraryChangeRequiresRestart(
+            libraryPath,
+            AacsService.CurrentStatus);
+        UpdateAacsStatus();
+        ShowNotice(_aacsLibraryRestartRequired
+            ? "Alternate AACS runtime selected · Restart NOIR to validate and apply"
+            : "This AACS runtime is already active");
+    }
+
+    private void OpenAacsFolder_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Directory.CreateDirectory(AacsService.KeyDatabaseDirectory);
+            Process.Start(new ProcessStartInfo(AacsService.KeyDatabaseDirectory) { UseShellExecute = true });
+            UpdateAacsStatus();
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+            ShowNotice("The AACS key folder could not be opened");
+        }
+    }
+
+    private void UpdateAacsStatus()
+    {
+        if (AacsStatusText is null)
+        {
+            return;
+        }
+
+        var status = AacsService.CurrentStatus;
+        if (_aacsLibraryRestartRequired)
+        {
+            AacsStatusText.Text = "Alternate AACS runtime selected · Restart NOIR to validate and apply";
+            AacsStatusText.Foreground = Brushes.Goldenrod;
+            return;
+        }
+
+        if (status.IsReady &&
+            AacsService.TryNormalizeLibraryPath(_settings.AacsLibraryPath, out var selectedLibraryPath) &&
+            !string.Equals(selectedLibraryPath, status.LibraryPath, StringComparison.OrdinalIgnoreCase))
+        {
+            AacsStatusText.Text = "Selected AACS runtime could not load · Using fallback runtime";
+            AacsStatusText.Foreground = Brushes.Goldenrod;
+            return;
+        }
+
+        AacsStatusText.Text = status.Message;
+        AacsStatusText.Foreground = status.IsReady
+            ? Brushes.Goldenrod
+            : FindBrush("MutedTextBrush", Brushes.Gray);
+    }
 
     private void Setting_Changed(object sender, RoutedEventArgs e)
     {

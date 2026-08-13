@@ -13,6 +13,7 @@ public sealed class PlayerSettings
     public bool AlwaysOnTop { get; set; }
     public bool Shuffle { get; set; }
     public string RepeatMode { get; set; } = "Off";
+    public string AacsLibraryPath { get; set; } = string.Empty;
     public string LastFolder { get; set; } = string.Empty;
     public List<string> RecentFiles { get; set; } = [];
     public Dictionary<string, long> ResumePositions { get; set; } = new(StringComparer.OrdinalIgnoreCase);

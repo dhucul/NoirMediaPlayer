@@ -25,7 +25,11 @@ NOIR is a modern, keyboard-first DVD, video, audio, and network-stream player fo
 - Persistent volume, mute, playback, and decoding preferences
 - Per-monitor DPI awareness and long-path support
 
-Protected commercial discs can depend on additional playback/decryption components permitted in the user's jurisdiction. NOIR does not bundle those components.
+NOIR bundles an open-source libaacs runtime for AACS integration. It does not bundle decryption keys or certificates.
+
+When an AACS-protected Blu-ray is opened, NOIR uses the bundled 64-bit libaacs and libbluray modules. If the runtime is missing or damaged, NOIR reports `AACS REQUIRED` instead of remaining at `BUFFERING 0%`. A protected disc that does not begin playback within 35 seconds is stopped with an AACS-specific error rather than buffering indefinitely. Unprotected Blu-rays do not require a key database.
+
+For protected media, place your legally obtained `KEYDB.cfg` at `%APPDATA%\aacs\KEYDB.cfg` using **Quick Settings → Blu-ray AACS → Open key folder**. Finding that file does not prove that it contains a matching key for a particular disc; NOIR reports an unlock failure when playback cannot begin. A different compatible 64-bit `libaacs.dll` can be selected in Quick Settings and is validated and applied after NOIR restarts. The VideoLAN libaacs project supplies no keys or certificates; key material must be configured for the disc in accordance with local law, or the disc must be played with licensed Blu-ray playback software. Binary provenance, source links, and licenses for the replaceable bundled libraries are documented in `src/NoirMediaPlayer/ThirdParty/Aacs/README.md`.
 
 ## Keyboard controls
 

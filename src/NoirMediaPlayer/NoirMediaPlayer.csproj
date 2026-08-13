@@ -26,4 +26,17 @@
     <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="ThirdParty\Aacs\*.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <TargetPath>libvlc\win-x64\%(Filename)%(Extension)</TargetPath>
+    </Content>
+    <Content Include="ThirdParty\Aacs\README.md;ThirdParty\Aacs\licenses\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <TargetPath>licenses\aacs\%(Filename)%(Extension)</TargetPath>
+    </Content>
+  </ItemGroup>
+
 </Project>

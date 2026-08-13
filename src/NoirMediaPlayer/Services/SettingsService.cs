@@ -116,6 +116,9 @@ public sealed class SettingsService
             ? settings.PlaybackRate
             : 1f;
         settings.RepeatMode = settings.RepeatMode is "Off" or "All" or "One" ? settings.RepeatMode : "Off";
+        settings.AacsLibraryPath = AacsService.TryNormalizeLibraryPath(settings.AacsLibraryPath, out var aacsLibraryPath)
+            ? aacsLibraryPath
+            : string.Empty;
         settings.LastFolder ??= string.Empty;
         settings.SnapshotFolder = string.IsNullOrWhiteSpace(settings.SnapshotFolder)
             ? new PlayerSettings().SnapshotFolder

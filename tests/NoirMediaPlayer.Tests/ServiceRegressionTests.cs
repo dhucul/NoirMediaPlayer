@@ -72,6 +72,68 @@ public sealed class ServiceRegressionTests
         var bluRayItem = DiscService.CreateFromFolder(temp.Path);
         Assert.NotNull(bluRayItem);
         Assert.StartsWith("bluray:///", bluRayItem.Source, StringComparison.OrdinalIgnoreCase);
+        Assert.False(DiscService.IsAacsProtectedSource(bluRayItem.Source));
+
+        Directory.CreateDirectory(Path.Combine(temp.Path, "AACS"));
+        Assert.True(DiscService.IsAacsProtectedSource(bluRayItem.Source));
+    }
+
+    [Theory]
+    [InlineData("https://example.com/disc", false)]
+    [InlineData("bluray://server/share", false)]
+    [InlineData("bluray:not-a-rooted-path", false)]
+    public void DiscProtection_RejectsNonLocalDiscSources(string source, bool expected)
+    {
+        Assert.Equal(expected, DiscService.IsAacsProtectedSource(source));
+    }
+
+    [Fact]
+    public void AacsLibraryPath_RequiresTheExpectedDllNameAndNormalizesIt()
+    {
+        using var temp = new TempDirectory();
+        var libraryPath = Path.Combine(temp.Path, "libaacs.dll");
+        File.WriteAllBytes(libraryPath, []);
+
+        Assert.True(AacsService.TryNormalizeLibraryPath(libraryPath, out var normalizedPath));
+        Assert.Equal(Path.GetFullPath(libraryPath), normalizedPath);
+        Assert.False(AacsService.TryNormalizeLibraryPath(Path.Combine(temp.Path, "other.dll"), out _));
+        Assert.False(AacsService.TryNormalizeLibraryPath("libaacs.dll", out _));
+    }
+
+    [Fact]
+    public void AacsLibraryChange_RequiresRestartOnlyWhenTheSelectedRuntimeDiffers()
+    {
+        using var activeDirectory = new TempDirectory();
+        var activePath = Path.Combine(activeDirectory.Path, "libaacs.dll");
+        var selectedDirectory = Path.Combine(activeDirectory.Path, "alternate");
+        Directory.CreateDirectory(selectedDirectory);
+        var selectedPath = Path.Combine(selectedDirectory, "libaacs.dll");
+        var currentStatus = new AacsRuntimeStatus(
+            AacsRuntimeState.Ready,
+            "ready",
+            activePath,
+            KeyDatabaseFound: false);
+
+        Assert.False(AacsService.LibraryChangeRequiresRestart(activePath, currentStatus));
+        Assert.True(AacsService.LibraryChangeRequiresRestart(selectedPath, currentStatus));
+        Assert.False(AacsService.LibraryChangeRequiresRestart(string.Empty, currentStatus));
+    }
+
+    [Fact]
+    public void PlaybackStartupPolicy_WatchesDiscsAndExplainsUnverifiedAacsKeys()
+    {
+        Assert.Equal(PlaybackStartupPolicy.DiscTimeout, PlaybackStartupPolicy.GetTimeout(false, true));
+        Assert.Equal(PlaybackStartupPolicy.NetworkTimeout, PlaybackStartupPolicy.GetTimeout(true, false));
+        Assert.Null(PlaybackStartupPolicy.GetTimeout(false, false));
+
+        var failure = PlaybackStartupPolicy.DescribeDiscFailure(
+            isAacsProtected: true,
+            keyDatabaseFound: true,
+            timedOut: true);
+
+        Assert.Equal("AACS UNLOCK FAILED", failure.EngineStatus);
+        Assert.Contains("matching key", failure.DialogMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("licensed Blu-ray", failure.DialogMessage, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
