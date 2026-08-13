@@ -420,7 +420,7 @@
                                        FontSize="11" TextTrimming="CharacterEllipsis" Margin="0,5,0,0" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
 
                             <WrapPanel Margin="0,12,0,18">
-                                <Border Background="#FF1B2016" CornerRadius="4" Padding="7,3" Margin="0,0,5,5">
+                                <Border Background="#FF18221A" CornerRadius="4" Padding="7,3" Margin="0,0,5,5">
                                     <TextBlock x:Name="FormatBadge" Text="READY" Foreground="{StaticResource AccentBrush}" FontSize="8" FontWeight="Bold" />
                                 </Border>
                                 <Border Background="{StaticResource RaisedBrush}" CornerRadius="4" Padding="7,3" Margin="0,0,5,5">

@@ -8,8 +8,8 @@
         <Color x:Key="RaisedColor">#FF13161C</Color>
         <Color x:Key="RaisedHoverColor">#FF1B1F27</Color>
         <Color x:Key="LineColor">#FF242932</Color>
-        <Color x:Key="AccentColor">#FFB7F02E</Color>
-        <Color x:Key="AccentHoverColor">#FFC8FF48</Color>
+        <Color x:Key="AccentColor">#FF76A86E</Color>
+        <Color x:Key="AccentHoverColor">#FF88B980</Color>
         <Color x:Key="TextColor">#FFC7CBD1</Color>
         <Color x:Key="ProminentTextColor">#FFDDE0E3</Color>
         <Color x:Key="MutedTextColor">#FF858D98</Color>
@@ -31,7 +31,7 @@
         <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="{StaticResource PanelColor}" />
         <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="{StaticResource TextColor}" />
         <SolidColorBrush x:Key="{x:Static SystemColors.GrayTextBrushKey}" Color="{StaticResource DisabledTextColor}" />
-        <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#FF28321B" />
+        <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#FF202A20" />
         <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="{StaticResource AccentColor}" />
 
         <FontFamily x:Key="UiFont">Segoe UI Variable Text, Segoe UI</FontFamily>
@@ -283,11 +283,11 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsHighlighted" Value="True">
-                                <Setter TargetName="ItemChrome" Property="Background" Value="#FF242B1B" />
+                                <Setter TargetName="ItemChrome" Property="Background" Value="#FF202A22" />
                                 <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
-                                <Setter TargetName="ItemChrome" Property="Background" Value="#FF20251A" />
+                                <Setter TargetName="ItemChrome" Property="Background" Value="#FF1B241D" />
                                 <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
@@ -336,7 +336,7 @@
                                 <Setter TargetName="ItemBorder" Property="Background" Value="{StaticResource RaisedBrush}" />
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
-                                <Setter TargetName="ItemBorder" Property="Background" Value="#FF20251A" />
+                                <Setter TargetName="ItemBorder" Property="Background" Value="#FF1B241D" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />

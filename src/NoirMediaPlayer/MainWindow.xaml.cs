@@ -134,9 +134,9 @@ public partial class MainWindow : Window
             _isPlaying = true;
             PlayPauseButton.Content = "\uE769";
             EngineStatusText.Text = "PLAYING";
-            EngineStatusDot.Fill = FindBrush("AccentBrush", Brushes.GreenYellow);
+            EngineStatusDot.Fill = FindBrush("AccentBrush", Brushes.DarkSeaGreen);
             StatusText.Text = _currentItem is null ? "Playing" : $"Playing · {_currentItem.Title}";
-            StatusDot.Fill = FindBrush("AccentBrush", Brushes.GreenYellow);
+            StatusDot.Fill = FindBrush("AccentBrush", Brushes.DarkSeaGreen);
             EmptyPlayerPanel.Visibility = Visibility.Collapsed;
             SetVideoSurfaceActive(true);
             _mediaPlayer.SetRate(_settings.PlaybackRate);
@@ -242,7 +242,7 @@ public partial class MainWindow : Window
         AlwaysOnTopCheckBox.IsChecked = _settings.AlwaysOnTop;
 
         ShuffleButton.Foreground = _settings.Shuffle
-            ? FindBrush("AccentBrush", Brushes.GreenYellow)
+            ? FindBrush("AccentBrush", Brushes.DarkSeaGreen)
             : FindBrush("ProminentTextBrush", Brushes.Gainsboro);
         UpdateRepeatVisual();
         SelectSpeed(_settings.PlaybackRate);
@@ -935,7 +935,7 @@ public partial class MainWindow : Window
     {
         MuteButton.Content = _mediaPlayer.Mute || VolumeSlider.Value <= 0 ? "\uE74F" : "\uE767";
         MuteButton.Foreground = _mediaPlayer.Mute
-            ? FindBrush("AccentBrush", Brushes.GreenYellow)
+            ? FindBrush("AccentBrush", Brushes.DarkSeaGreen)
             : FindBrush("ProminentTextBrush", Brushes.Gainsboro);
     }
 
@@ -1013,7 +1013,7 @@ public partial class MainWindow : Window
     {
         _settings.Shuffle = !_settings.Shuffle;
         ShuffleButton.Foreground = _settings.Shuffle
-            ? FindBrush("AccentBrush", Brushes.GreenYellow)
+            ? FindBrush("AccentBrush", Brushes.DarkSeaGreen)
             : FindBrush("ProminentTextBrush", Brushes.Gainsboro);
         ScheduleSettingsSave();
         ShowNotice(_settings.Shuffle ? "Shuffle on" : "Shuffle off");
@@ -1036,7 +1036,7 @@ public partial class MainWindow : Window
     {
         RepeatButton.Foreground = _settings.RepeatMode == "Off"
             ? FindBrush("ProminentTextBrush", Brushes.Gainsboro)
-            : FindBrush("AccentBrush", Brushes.GreenYellow);
+            : FindBrush("AccentBrush", Brushes.DarkSeaGreen);
         RepeatButton.ToolTip = $"Repeat: {_settings.RepeatMode} (R)";
     }
 
