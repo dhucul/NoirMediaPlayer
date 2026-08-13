@@ -15,7 +15,8 @@
             </Grid.RowDefinitions>
             <Grid MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
                 <StackPanel>
-                    <TextBlock Text="OPEN NETWORK STREAM" FontFamily="{StaticResource DisplayFont}" FontSize="15" FontWeight="Bold" />
+                    <TextBlock Text="OPEN NETWORK STREAM" Foreground="{StaticResource ProminentTextBrush}"
+                               FontFamily="{StaticResource DisplayFont}" FontSize="15" FontWeight="Bold" />
                     <TextBlock Text="HTTP, HTTPS, RTSP, RTP, UDP, or a direct media URL" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,4,0,0" />
                 </StackPanel>
                 <Button Style="{StaticResource IconButton}" Content="&#xE8BB;" Width="30" Height="30" HorizontalAlignment="Right" Click="Cancel_Click" />

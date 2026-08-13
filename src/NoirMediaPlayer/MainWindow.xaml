@@ -62,6 +62,13 @@
                                 <TextBlock Text="Open" />
                             </StackPanel>
                         </Button>
+                        <Button x:Name="InspectorToggleButton" Style="{StaticResource SidebarButton}" Padding="10,6" Margin="2,0,0,0"
+                                Click="ToggleInspector_Click" ToolTip="Show or hide inspector (I)">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE946;" FontFamily="{StaticResource IconFont}" Margin="0,0,7,0" />
+                                <TextBlock x:Name="InspectorToggleText" Text="Hide inspector" />
+                            </StackPanel>
+                        </Button>
                         <Button x:Name="SettingsButton" Style="{StaticResource IconButton}" Width="32" Height="32"
                                 Content="&#xE713;" Click="Settings_Click" ToolTip="Quick settings" />
                     </StackPanel>
@@ -151,7 +158,60 @@
 
                         <Grid Grid.Row="4">
                             <ListBox x:Name="PlaylistView" SelectionChanged="PlaylistView_SelectionChanged"
-                                     MouseDoubleClick="PlaylistView_MouseDoubleClick">
+                                     MouseDoubleClick="PlaylistView_MouseDoubleClick"
+                                     ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                <ListBox.Resources>
+                                    <Style TargetType="ScrollBar">
+                                        <Setter Property="Width" Value="10" />
+                                        <Setter Property="Margin" Value="4,2,0,2" />
+                                        <Setter Property="Background" Value="#FF080A0D" />
+                                        <Setter Property="Template">
+                                            <Setter.Value>
+                                                <ControlTemplate TargetType="ScrollBar">
+                                                    <Border Background="{TemplateBinding Background}" CornerRadius="5">
+                                                        <Track x:Name="PART_Track" IsDirectionReversed="True"
+                                                               Orientation="{TemplateBinding Orientation}"
+                                                               Minimum="{TemplateBinding Minimum}"
+                                                               Maximum="{TemplateBinding Maximum}"
+                                                               Value="{TemplateBinding Value}"
+                                                               ViewportSize="{TemplateBinding ViewportSize}">
+                                                            <Track.DecreaseRepeatButton>
+                                                                <RepeatButton Command="{x:Static ScrollBar.PageUpCommand}"
+                                                                              Background="Transparent" BorderThickness="0"
+                                                                              Focusable="False" />
+                                                            </Track.DecreaseRepeatButton>
+                                                            <Track.Thumb>
+                                                                <Thumb Background="#FF424A56" MinHeight="32">
+                                                                    <Thumb.Template>
+                                                                        <ControlTemplate TargetType="Thumb">
+                                                                            <Border x:Name="ThumbChrome"
+                                                                                    Margin="2,0"
+                                                                                    Background="{TemplateBinding Background}"
+                                                                                    CornerRadius="3" />
+                                                                            <ControlTemplate.Triggers>
+                                                                                <Trigger Property="IsMouseOver" Value="True">
+                                                                                    <Setter TargetName="ThumbChrome" Property="Background" Value="#FF697381" />
+                                                                                </Trigger>
+                                                                                <Trigger Property="IsDragging" Value="True">
+                                                                                    <Setter TargetName="ThumbChrome" Property="Background" Value="{StaticResource AccentBrush}" />
+                                                                                </Trigger>
+                                                                            </ControlTemplate.Triggers>
+                                                                        </ControlTemplate>
+                                                                    </Thumb.Template>
+                                                                </Thumb>
+                                                            </Track.Thumb>
+                                                            <Track.IncreaseRepeatButton>
+                                                                <RepeatButton Command="{x:Static ScrollBar.PageDownCommand}"
+                                                                              Background="Transparent" BorderThickness="0"
+                                                                              Focusable="False" />
+                                                            </Track.IncreaseRepeatButton>
+                                                        </Track>
+                                                    </Border>
+                                                </ControlTemplate>
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Style>
+                                </ListBox.Resources>
                                 <ListBox.ItemTemplate>
                                     <DataTemplate DataType="{x:Type models:PlaylistItem}">
                                         <Grid>
@@ -190,7 +250,7 @@
                             <StackPanel x:Name="EmptyQueuePanel" VerticalAlignment="Center" HorizontalAlignment="Center" IsHitTestVisible="False">
                                 <TextBlock Text="&#xE8FD;" FontFamily="{StaticResource IconFont}" Foreground="#FF343A44" FontSize="28" HorizontalAlignment="Center" />
                                 <TextBlock Text="Your queue is empty" Foreground="{StaticResource MutedTextBrush}" FontSize="11" Margin="0,9,0,0" />
-                                <TextBlock Text="Drop files anywhere" Foreground="#FF5D6570" FontSize="9" HorizontalAlignment="Center" Margin="0,3,0,0" />
+                                <TextBlock Text="Drop files anywhere" Foreground="{StaticResource MutedTextBrush}" FontSize="9" HorizontalAlignment="Center" Margin="0,3,0,0" />
                             </StackPanel>
                         </Grid>
 
@@ -200,7 +260,7 @@
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <Button Style="{StaticResource NoirButton}" Padding="9,6" Click="SavePlaylist_Click" ToolTip="Save M3U playlist">
+                            <Button x:Name="SavePlaylistButton" Style="{StaticResource NoirButton}" Padding="9,6" Click="SavePlaylist_Click" ToolTip="Save M3U playlist">
                                 <StackPanel Orientation="Horizontal">
                                     <TextBlock Text="&#xE74E;" FontFamily="{StaticResource IconFont}" Margin="0,0,6,0" />
                                     <TextBlock Text="Save" FontSize="10" />
@@ -218,13 +278,13 @@
                 <Grid Grid.Column="1" Background="#FF020304">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="*" />
-                        <RowDefinition Height="116" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
                     <Border Grid.Row="0" Margin="12,12,12,0" Background="#FF000000" CornerRadius="10" ClipToBounds="True"
                             BorderBrush="#FF171A20" BorderThickness="1">
-                        <vlc:VideoView x:Name="VideoView">
-                            <Grid Background="Transparent" IsHitTestVisible="False">
+                        <vlc:VideoView x:Name="VideoView" Background="#FF000000">
+                            <Grid x:Name="VideoOverlay" Background="#FF000000" IsHitTestVisible="False">
                                 <StackPanel x:Name="EmptyPlayerPanel" VerticalAlignment="Center" HorizontalAlignment="Center">
                                     <Border Width="82" Height="82" CornerRadius="26" Background="#D90D1015" BorderBrush="#FF242A33" BorderThickness="1">
                                         <Grid>
@@ -241,7 +301,8 @@
 
                                 <Border x:Name="PlaybackNotice" Visibility="Collapsed" Background="#E515181E" CornerRadius="7"
                                         Padding="13,8" VerticalAlignment="Top" HorizontalAlignment="Center" Margin="0,18,0,0">
-                                    <TextBlock x:Name="PlaybackNoticeText" FontWeight="SemiBold" FontSize="11" />
+                                    <TextBlock x:Name="PlaybackNoticeText" Foreground="{StaticResource ProminentTextBrush}"
+                                               FontWeight="SemiBold" FontSize="11" />
                                 </Border>
 
                                 <Border VerticalAlignment="Bottom" HorizontalAlignment="Left" Margin="16" Background="#B20A0C10"
@@ -256,7 +317,7 @@
                         </vlc:VideoView>
                     </Border>
 
-                    <Border Grid.Row="1" Background="#FF080A0D" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="16,10,16,8">
+                    <Border Grid.Row="1" MinHeight="116" Background="#FF080A0D" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="16,10,16,8">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
@@ -276,21 +337,31 @@
                                            FontSize="10" Width="52" TextAlignment="Right" VerticalAlignment="Center" />
                             </Grid>
 
-                            <Grid Grid.Row="1" Margin="0,7,0,0">
+                            <Grid x:Name="TransportLayoutGrid" Grid.Row="1" Margin="0,7,0,0"
+                                  SizeChanged="TransportLayout_SizeChanged">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
 
-                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <StackPanel x:Name="TransportToolsPanel" Grid.ColumnSpan="2"
+                                            Orientation="Horizontal" VerticalAlignment="Center">
                                     <Button x:Name="ShuffleButton" Style="{StaticResource TransportButton}" Content="&#xE8B1;" Click="Shuffle_Click" ToolTip="Shuffle (H)" />
                                     <Button x:Name="RepeatButton" Style="{StaticResource TransportButton}" Content="&#xE8EE;" Click="Repeat_Click" ToolTip="Repeat: Off (R)" />
                                     <Button Style="{StaticResource TransportButton}" Content="&#xE722;" Click="AddSubtitle_Click" ToolTip="Load subtitle (V)" />
                                     <Button Style="{StaticResource TransportButton}" Content="&#xEB9F;" Click="Snapshot_Click" ToolTip="Snapshot (S)" />
                                 </StackPanel>
 
-                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <StackPanel x:Name="PrimaryTransportPanel" Grid.Column="2" Grid.ColumnSpan="2"
+                                            Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Center">
                                     <Button Style="{StaticResource TransportButton}" Content="&#xE892;" Click="Previous_Click" ToolTip="Previous (Page Up)" />
                                     <Button Style="{StaticResource TransportButton}" Content="&#xE71A;" Click="Stop_Click" ToolTip="Stop" />
                                     <Button x:Name="PlayPauseButton" Style="{StaticResource AccentButton}" Width="52" Height="52" Padding="0"
@@ -301,8 +372,9 @@
                                     <Button Style="{StaticResource TransportButton}" Content="&#xE8F5;" Click="ToggleCompact_Click" ToolTip="Mini player (P)" />
                                 </StackPanel>
 
-                                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Right">
-                                    <ComboBox x:Name="SpeedComboBox" Width="68" SelectedIndex="3" SelectionChanged="Speed_SelectionChanged" ToolTip="Playback speed">
+                                <StackPanel x:Name="VolumeControlsPanel" Grid.Column="4" Grid.ColumnSpan="2"
+                                            Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Right">
+                                    <ComboBox x:Name="SpeedComboBox" Width="68" Padding="8,0,22,0" SelectedIndex="3" SelectionChanged="Speed_SelectionChanged" ToolTip="Playback speed">
                                         <ComboBoxItem Content="0.50×" Tag="0.5" />
                                         <ComboBoxItem Content="0.75×" Tag="0.75" />
                                         <ComboBoxItem Content="0.90×" Tag="0.9" />
@@ -341,7 +413,8 @@
                                 </Grid>
                             </Border>
 
-                            <TextBlock x:Name="NowPlayingTitle" Text="Nothing queued" FontFamily="{StaticResource DisplayFont}" FontSize="19"
+                            <TextBlock x:Name="NowPlayingTitle" Text="Nothing queued" Foreground="{StaticResource ProminentTextBrush}"
+                                       FontFamily="{StaticResource DisplayFont}" FontSize="19"
                                        FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,15,0,0" />
                             <TextBlock x:Name="NowPlayingSource" Text="Choose a source to begin" Foreground="{StaticResource MutedTextBrush}"
                                        FontSize="11" TextTrimming="CharacterEllipsis" Margin="0,5,0,0" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
@@ -436,11 +509,11 @@
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                         <TextBlock Text="SPACE" Style="{StaticResource SectionLabel}" />
-                        <TextBlock Text=" play/pause   " Foreground="#FF666D78" FontSize="9" />
+                        <TextBlock Text=" play/pause   " Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
                         <TextBlock Text="F" Style="{StaticResource SectionLabel}" />
-                        <TextBlock Text=" fullscreen   " Foreground="#FF666D78" FontSize="9" />
+                        <TextBlock Text=" fullscreen   " Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
                         <TextBlock Text="← →" Style="{StaticResource SectionLabel}" />
-                        <TextBlock Text=" seek" Foreground="#FF666D78" FontSize="9" />
+                        <TextBlock Text=" seek" Foreground="{StaticResource MutedTextBrush}" FontSize="9" />
                     </StackPanel>
                 </Grid>
             </Border>
@@ -452,7 +525,8 @@
                         CornerRadius="10" Padding="17" Margin="0,8,8,0">
                     <StackPanel>
                         <Grid Margin="0,0,0,14">
-                            <TextBlock Text="QUICK SETTINGS" FontFamily="{StaticResource DisplayFont}" FontSize="13" FontWeight="Bold" />
+                            <TextBlock Text="QUICK SETTINGS" Foreground="{StaticResource ProminentTextBrush}"
+                                       FontFamily="{StaticResource DisplayFont}" FontSize="13" FontWeight="Bold" />
                             <TextBlock Text="NOIR" Foreground="{StaticResource AccentBrush}" FontSize="9" FontWeight="Bold" HorizontalAlignment="Right" />
                         </Grid>
                         <CheckBox x:Name="RememberPositionCheckBox" Content="Remember playback position" Margin="0,0,0,11"
@@ -471,7 +545,7 @@
                             </StackPanel>
                         </Button>
                         <TextBlock Text="LibVLC engine · Keyboard-first controls · Local settings"
-                                   Foreground="#FF666D78" FontSize="8" TextWrapping="Wrap" Margin="0,12,0,0" />
+                                   Foreground="{StaticResource MutedTextBrush}" FontSize="8" TextWrapping="Wrap" Margin="0,12,0,0" />
                     </StackPanel>
                 </Border>
             </Popup>

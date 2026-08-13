@@ -3,11 +3,14 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using LibVLCSharp.Shared;
@@ -25,6 +28,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _uiTimer;
     private readonly DispatcherTimer _noticeTimer;
     private readonly Random _random = new();
+    private readonly HashSet<string> _playlistSources = new(StringComparer.OrdinalIgnoreCase);
     private readonly PlayerSettings _settings;
     private readonly LibVLC _libVlc;
     private readonly VlcMediaPlayer _mediaPlayer;
@@ -34,6 +38,7 @@ public partial class MainWindow : Window
     private bool _isPlaying;
     private bool _isScrubbing;
     private bool _isInitializing = true;
+    private bool _isClosing;
     private bool _isFullscreen;
     private bool _isCompact;
     private bool _inspectorVisible = true;
@@ -42,8 +47,40 @@ public partial class MainWindow : Window
     private int _rotation;
     private long _pendingResumePosition;
     private long _lastPersistedAt;
+    private CancellationTokenSource? _sourceImportCancellation;
+    private CancellationTokenSource? _discScanCancellation;
+    private CancellationTokenSource? _settingsSaveCancellation;
     private Rect _restoreBounds;
     private WindowState _restoreWindowState;
+
+    private const int ImportBatchSize = 100;
+
+    private const uint MonitorDefaultToNearest = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo
+    {
+        public int Size;
+        public NativeRect Monitor;
+        public NativeRect WorkArea;
+        public uint Flags;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr windowHandle, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(IntPtr monitorHandle, ref MonitorInfo monitorInfo);
 
     public MainWindow()
     {
@@ -101,6 +138,7 @@ public partial class MainWindow : Window
             StatusText.Text = _currentItem is null ? "Playing" : $"Playing · {_currentItem.Title}";
             StatusDot.Fill = FindBrush("AccentBrush", Brushes.GreenYellow);
             EmptyPlayerPanel.Visibility = Visibility.Collapsed;
+            SetVideoSurfaceActive(true);
             _mediaPlayer.SetRate(_settings.PlaybackRate);
 
             if (_pendingResumePosition > 0 && _mediaPlayer.Length > _pendingResumePosition + 10_000)
@@ -129,6 +167,7 @@ public partial class MainWindow : Window
             PlayPauseButton.Content = "\uE768";
             EngineStatusText.Text = "STOPPED";
             EngineStatusDot.Fill = new SolidColorBrush(Color.FromRgb(94, 102, 114));
+            SetVideoSurfaceActive(false);
         });
 
         _mediaPlayer.EndReached += (_, _) => Dispatcher.BeginInvoke(HandleMediaEnded);
@@ -140,6 +179,7 @@ public partial class MainWindow : Window
             EngineStatusDot.Fill = Brushes.OrangeRed;
             StatusText.Text = "This source could not be played";
             StatusDot.Fill = Brushes.OrangeRed;
+            SetVideoSurfaceActive(false);
             ShowNotice("Playback error — check the source or disc");
         });
         _mediaPlayer.Buffering += (_, args) => Dispatcher.BeginInvoke(() =>
@@ -151,7 +191,7 @@ public partial class MainWindow : Window
         });
     }
 
-    private void Window_Loaded(object sender, RoutedEventArgs e)
+    private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
         _uiTimer.Start();
         StatusText.Text = "LibVLC ready · Drop media anywhere";
@@ -161,18 +201,22 @@ public partial class MainWindow : Window
         if (launchFiles.Contains("--smoke-test", StringComparer.OrdinalIgnoreCase))
         {
             StatusText.Text = "Startup smoke test passed";
-            Dispatcher.BeginInvoke(Close, DispatcherPriority.ApplicationIdle);
+            _ = Dispatcher.BeginInvoke(Close, DispatcherPriority.ApplicationIdle);
             return;
         }
 
         if (launchFiles.Length > 0)
         {
-            AddSources(launchFiles, true);
+            await ImportSourcesAsync(launchFiles, playFirst: true);
         }
     }
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
+        _isClosing = true;
+        _sourceImportCancellation?.Cancel();
+        _discScanCancellation?.Cancel();
+        _settingsSaveCancellation?.Cancel();
         PersistCurrentPosition(force: true);
         _settings.Volume = (int)VolumeSlider.Value;
         _settings.IsMuted = _mediaPlayer.Mute;
@@ -197,12 +241,14 @@ public partial class MainWindow : Window
         HardwareDecodingCheckBox.IsChecked = _settings.HardwareDecoding;
         AlwaysOnTopCheckBox.IsChecked = _settings.AlwaysOnTop;
 
-        ShuffleButton.Foreground = _settings.Shuffle ? FindBrush("AccentBrush", Brushes.GreenYellow) : FindBrush("TextBrush", Brushes.White);
+        ShuffleButton.Foreground = _settings.Shuffle
+            ? FindBrush("AccentBrush", Brushes.GreenYellow)
+            : FindBrush("ProminentTextBrush", Brushes.Gainsboro);
         UpdateRepeatVisual();
         SelectSpeed(_settings.PlaybackRate);
     }
 
-    private void OpenFile_Click(object sender, RoutedEventArgs e)
+    private async void OpenFile_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFileDialog
         {
@@ -219,7 +265,8 @@ public partial class MainWindow : Window
         }
 
         _settings.LastFolder = Path.GetDirectoryName(dialog.FileName) ?? _settings.LastFolder;
-        AddSources(dialog.FileNames, true);
+        ScheduleSettingsSave();
+        await ImportSourcesAsync(dialog.FileNames, playFirst: true);
     }
 
     private async void OpenFolder_Click(object sender, RoutedEventArgs e)
@@ -237,39 +284,55 @@ public partial class MainWindow : Window
         }
 
         _settings.LastFolder = dialog.FolderName;
-        var discItem = DiscService.CreateFromFolder(dialog.FolderName);
-        if (discItem is not null)
-        {
-            AddItem(discItem, playNow: true);
-            return;
-        }
-
-        StatusText.Text = "Scanning folder…";
-        var paths = await Task.Run(() => MediaSourceService.EnumerateFolder(dialog.FolderName).ToList());
-        if (paths.Count == 0)
-        {
-            ShowNotice("No supported media found in that folder");
-            StatusText.Text = "Ready";
-            return;
-        }
-
-        AddSources(paths, true);
-        ShowNotice($"Added {paths.Count:N0} item{(paths.Count == 1 ? string.Empty : "s")}");
+        ScheduleSettingsSave();
+        await ImportSourcesAsync([dialog.FolderName], playFirst: true, showResultNotice: true);
     }
 
-    private void OpenDisc_Click(object sender, RoutedEventArgs e)
+    private async void OpenDisc_Click(object sender, RoutedEventArgs e)
     {
-        var discs = DiscService.FindVideoDiscs();
-        if (discs.Count == 0)
-        {
-            ShowNotice("No ready optical disc found — you can open a VIDEO_TS folder instead");
-            StatusText.Text = "No DVD or Blu-ray disc detected";
-            return;
-        }
+        var cancellation = new CancellationTokenSource();
+        var previousCancellation = _discScanCancellation;
+        _discScanCancellation = cancellation;
+        previousCancellation?.Cancel();
+        StatusText.Text = "Looking for optical discs…";
 
-        var item = DiscService.CreateItem(discs[0]);
-        AddItem(item, playNow: true);
-        ShowNotice($"Opening {discs[0].DisplayName}");
+        try
+        {
+            var discs = await Task.Run(() => DiscService.FindVideoDiscs(cancellation.Token), cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (discs.Count == 0)
+            {
+                ShowNotice("No ready optical disc found — you can open a VIDEO_TS folder instead");
+                StatusText.Text = "No DVD or Blu-ray disc detected";
+                return;
+            }
+
+            var item = DiscService.CreateItem(discs[0]);
+            AddItem(item, playNow: true);
+            ShowNotice($"Opening {discs[0].DisplayName}");
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer scan or window shutdown superseded this request.
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+            if (!_isClosing && ReferenceEquals(_discScanCancellation, cancellation))
+            {
+                StatusText.Text = "Optical disc scan failed";
+                ShowNotice("Optical drives could not be checked");
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_discScanCancellation, cancellation))
+            {
+                _discScanCancellation = null;
+            }
+
+            cancellation.Dispose();
+        }
     }
 
     private void OpenLocation_Click(object sender, RoutedEventArgs e)
@@ -283,36 +346,138 @@ public partial class MainWindow : Window
         AddItem(MediaSourceService.CreateNetworkItem(dialog.MediaLocation.Trim()), playNow: true);
     }
 
-    private void AddSources(IEnumerable<string> sources, bool playFirst)
+    private async Task<int> ImportSourcesAsync(
+        IEnumerable<string> sources,
+        bool playFirst,
+        bool showResultNotice = false)
     {
+        var sourceList = sources.Where(source => !string.IsNullOrWhiteSpace(source)).ToArray();
+        if (sourceList.Length == 0)
+        {
+            return 0;
+        }
+
+        var cancellation = new CancellationTokenSource();
+        var previousCancellation = _sourceImportCancellation;
+        _sourceImportCancellation = cancellation;
+        previousCancellation?.Cancel();
+
+        var existingSources = new HashSet<string>(_playlistSources, StringComparer.OrdinalIgnoreCase);
         PlaylistItem? firstAdded = null;
         var added = 0;
+        StatusText.Text = "Scanning media…";
 
-        foreach (var source in MediaSourceService.ExpandFiles(sources))
+        try
         {
+            var items = await Task.Run(
+                () => BuildImportItems(sourceList, existingSources, cancellation.Token),
+                cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+
+            for (var offset = 0; offset < items.Count; offset += ImportBatchSize)
+            {
+                cancellation.Token.ThrowIfCancellationRequested();
+                var batchEnd = Math.Min(offset + ImportBatchSize, items.Count);
+                for (var itemIndex = offset; itemIndex < batchEnd; itemIndex++)
+                {
+                    var item = items[itemIndex];
+                    if (!_playlistSources.Add(item.Source))
+                    {
+                        continue;
+                    }
+
+                    _playlist.Add(item);
+                    firstAdded ??= item;
+                    added++;
+                }
+
+                if (offset + ImportBatchSize < items.Count)
+                {
+                    await Dispatcher.Yield(DispatcherPriority.Background);
+                }
+            }
+
+            RefreshQueueState();
+            if (firstAdded is not null && playFirst)
+            {
+                PlayItem(firstAdded);
+            }
+            else if (added > 0)
+            {
+                StatusText.Text = $"Added {added:N0} item{(added == 1 ? string.Empty : "s")} to the queue";
+            }
+            else
+            {
+                StatusText.Text = "Ready";
+            }
+
+            if (showResultNotice)
+            {
+                ShowNotice(added > 0
+                    ? $"Added {added:N0} item{(added == 1 ? string.Empty : "s")}"
+                    : "No new supported media found");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (!_isClosing && ReferenceEquals(_sourceImportCancellation, cancellation))
+            {
+                StatusText.Text = "Ready";
+            }
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+            if (!_isClosing && ReferenceEquals(_sourceImportCancellation, cancellation))
+            {
+                StatusText.Text = $"Media scan failed · {exception.Message}";
+                ShowNotice("Some sources could not be scanned");
+            }
+        }
+        finally
+        {
+            if (added > 0)
+            {
+                RefreshQueueState();
+            }
+
+            if (ReferenceEquals(_sourceImportCancellation, cancellation))
+            {
+                _sourceImportCancellation = null;
+            }
+
+            cancellation.Dispose();
+        }
+
+        return added;
+    }
+
+    private static List<PlaylistItem> BuildImportItems(
+        IReadOnlyList<string> sources,
+        HashSet<string> existingSources,
+        CancellationToken cancellationToken)
+    {
+        if (sources.Count == 1 && Directory.Exists(sources[0]) &&
+            DiscService.CreateFromFolder(sources[0]) is { } discItem)
+        {
+            return existingSources.Add(discItem.Source) ? [discItem] : [];
+        }
+
+        var result = new List<PlaylistItem>();
+        foreach (var source in MediaSourceService.ExpandFiles(sources, cancellationToken))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             var item = Uri.TryCreate(source, UriKind.Absolute, out var uri) && !uri.IsFile
                 ? MediaSourceService.CreateNetworkItem(source)
                 : MediaSourceService.CreateFileItem(source);
 
-            if (_playlist.Any(existing => string.Equals(existing.Source, item.Source, StringComparison.OrdinalIgnoreCase)))
+            if (existingSources.Add(item.Source))
             {
-                continue;
+                result.Add(item);
             }
-
-            _playlist.Add(item);
-            firstAdded ??= item;
-            added++;
         }
 
-        RefreshQueueState();
-        if (firstAdded is not null && playFirst)
-        {
-            PlayItem(firstAdded);
-        }
-        else if (added > 0)
-        {
-            StatusText.Text = $"Added {added:N0} item{(added == 1 ? string.Empty : "s")} to the queue";
-        }
+        return result;
     }
 
     private void AddItem(PlaylistItem item, bool playNow)
@@ -322,6 +487,7 @@ public partial class MainWindow : Window
 
         if (existing is null)
         {
+            _playlistSources.Add(item.Source);
             _playlist.Add(item);
             existing = item;
         }
@@ -364,7 +530,9 @@ public partial class MainWindow : Window
         }
 
         UpdateNowPlaying(item);
+        SetVideoSurfaceActive(false);
         AddRecent(item.Source);
+        ScheduleSettingsSave();
         EngineStatusText.Text = item.IsDisc ? "READING DISC" : item.IsNetwork ? "CONNECTING" : "OPENING";
         EngineStatusDot.Fill = Brushes.Goldenrod;
         StatusText.Text = $"Opening · {item.Title}";
@@ -495,6 +663,7 @@ public partial class MainWindow : Window
         if (_currentItem is not null)
         {
             _settings.ResumePositions.Remove(_currentItem.Source);
+            ScheduleSettingsSave();
         }
 
         if (_settings.RepeatMode == "One" && _currentItem is not null)
@@ -512,6 +681,7 @@ public partial class MainWindow : Window
             _isPlaying = false;
             PlayPauseButton.Content = "\uE768";
             StatusText.Text = "Playback finished";
+            SetVideoSurfaceActive(false);
         }
     }
 
@@ -583,7 +753,7 @@ public partial class MainWindow : Window
         if (force)
         {
             TrimResumeHistory();
-            _settingsService.Save(_settings);
+            ScheduleSettingsSave();
         }
     }
 
@@ -747,6 +917,7 @@ public partial class MainWindow : Window
         _settings.Volume = (int)e.NewValue;
         _settings.IsMuted = _mediaPlayer.Mute;
         UpdateMuteVisual();
+        ScheduleSettingsSave();
     }
 
     private void Mute_Click(object sender, RoutedEventArgs e) => ToggleMute();
@@ -756,13 +927,16 @@ public partial class MainWindow : Window
         _mediaPlayer.Mute = !_mediaPlayer.Mute;
         _settings.IsMuted = _mediaPlayer.Mute;
         UpdateMuteVisual();
+        ScheduleSettingsSave();
         ShowNotice(_mediaPlayer.Mute ? "Muted" : $"Volume · {(int)VolumeSlider.Value}%");
     }
 
     private void UpdateMuteVisual()
     {
         MuteButton.Content = _mediaPlayer.Mute || VolumeSlider.Value <= 0 ? "\uE74F" : "\uE767";
-        MuteButton.Foreground = _mediaPlayer.Mute ? FindBrush("AccentBrush", Brushes.GreenYellow) : FindBrush("TextBrush", Brushes.White);
+        MuteButton.Foreground = _mediaPlayer.Mute
+            ? FindBrush("AccentBrush", Brushes.GreenYellow)
+            : FindBrush("ProminentTextBrush", Brushes.Gainsboro);
     }
 
     private void Speed_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -774,6 +948,7 @@ public partial class MainWindow : Window
         }
 
         _settings.PlaybackRate = rate;
+        ScheduleSettingsSave();
         if (RateBadge is not null)
         {
             RateBadge.Text = $"{rate:0.00}×";
@@ -837,7 +1012,10 @@ public partial class MainWindow : Window
     private void Shuffle_Click(object sender, RoutedEventArgs e)
     {
         _settings.Shuffle = !_settings.Shuffle;
-        ShuffleButton.Foreground = _settings.Shuffle ? FindBrush("AccentBrush", Brushes.GreenYellow) : FindBrush("TextBrush", Brushes.White);
+        ShuffleButton.Foreground = _settings.Shuffle
+            ? FindBrush("AccentBrush", Brushes.GreenYellow)
+            : FindBrush("ProminentTextBrush", Brushes.Gainsboro);
+        ScheduleSettingsSave();
         ShowNotice(_settings.Shuffle ? "Shuffle on" : "Shuffle off");
     }
 
@@ -850,13 +1028,14 @@ public partial class MainWindow : Window
             _ => "Off"
         };
         UpdateRepeatVisual();
+        ScheduleSettingsSave();
         ShowNotice($"Repeat · {_settings.RepeatMode}");
     }
 
     private void UpdateRepeatVisual()
     {
         RepeatButton.Foreground = _settings.RepeatMode == "Off"
-            ? FindBrush("TextBrush", Brushes.White)
+            ? FindBrush("ProminentTextBrush", Brushes.Gainsboro)
             : FindBrush("AccentBrush", Brushes.GreenYellow);
         RepeatButton.ToolTip = $"Repeat: {_settings.RepeatMode} (R)";
     }
@@ -904,6 +1083,7 @@ public partial class MainWindow : Window
 
         var wasCurrent = ReferenceEquals(item, _currentItem);
         _playlist.Remove(item);
+        _playlistSources.Remove(item.Source);
         if (wasCurrent)
         {
             _mediaPlayer.Stop();
@@ -917,12 +1097,14 @@ public partial class MainWindow : Window
 
     private void ClearPlaylist_Click(object sender, RoutedEventArgs e)
     {
+        _sourceImportCancellation?.Cancel();
         _mediaPlayer.Stop();
         foreach (var item in _playlist)
         {
             item.IsPlaying = false;
         }
         _playlist.Clear();
+        _playlistSources.Clear();
         _currentItem = null;
         _currentIndex = -1;
         ResetNowPlaying();
@@ -930,7 +1112,7 @@ public partial class MainWindow : Window
         ShowNotice("Queue cleared");
     }
 
-    private void SavePlaylist_Click(object sender, RoutedEventArgs e)
+    private async void SavePlaylist_Click(object sender, RoutedEventArgs e)
     {
         if (_playlist.Count == 0)
         {
@@ -957,8 +1139,23 @@ public partial class MainWindow : Window
             lines.Add($"#EXTINF:{(item.DurationMilliseconds > 0 ? item.DurationMilliseconds / 1000 : -1)},{item.Title}");
             lines.Add(item.Source);
         }
-        File.WriteAllLines(dialog.FileName, lines, new UTF8Encoding(false));
-        ShowNotice($"Playlist saved · {Path.GetFileName(dialog.FileName)}");
+        SavePlaylistButton.IsEnabled = false;
+        StatusText.Text = "Saving playlist…";
+        try
+        {
+            await File.WriteAllLinesAsync(dialog.FileName, lines, new UTF8Encoding(false));
+            ShowNotice($"Playlist saved · {Path.GetFileName(dialog.FileName)}");
+            StatusText.Text = "Playlist saved";
+        }
+        catch
+        {
+            ShowNotice("The playlist could not be saved");
+            StatusText.Text = "Playlist save failed";
+        }
+        finally
+        {
+            SavePlaylistButton.IsEnabled = true;
+        }
     }
 
     private void RefreshQueueState()
@@ -976,6 +1173,7 @@ public partial class MainWindow : Window
         FormatBadge.Text = "READY";
         ResolutionBadge.Text = "—";
         EmptyPlayerPanel.Visibility = Visibility.Visible;
+        SetVideoSurfaceActive(false);
         TimelineSlider.Value = 0;
         ElapsedText.Text = "0:00";
         RemainingText.Text = "−0:00";
@@ -987,34 +1185,34 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
-    private void Window_Drop(object sender, DragEventArgs e)
+    private async void Window_Drop(object sender, DragEventArgs e)
     {
         if (e.Data.GetData(DataFormats.FileDrop) is not string[] paths)
         {
             return;
         }
 
-        var discFolder = paths.Length == 1 && Directory.Exists(paths[0]) ? DiscService.CreateFromFolder(paths[0]) : null;
-        if (discFolder is not null)
-        {
-            AddItem(discFolder, playNow: true);
-        }
-        else
-        {
-            AddSources(paths, true);
-        }
+        await ImportSourcesAsync(paths, playFirst: true, showResultNotice: true);
     }
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (Keyboard.FocusedElement is TextBox or ComboBox)
+        var focusedElement = Keyboard.FocusedElement;
+        if (focusedElement is TextBoxBase or ComboBox or ComboBoxItem)
         {
+            return;
+        }
+
+        if (focusedElement is ButtonBase && e.Key is Key.Space or Key.Enter)
+        {
+            // Let focused buttons and check boxes keep their native keyboard activation.
             return;
         }
 
         if (_currentItem?.IsDisc == true && Keyboard.Modifiers.HasFlag(ModifierKeys.Alt))
         {
-            var navigation = e.Key switch
+            var navigationKey = e.Key == Key.System ? e.SystemKey : e.Key;
+            var navigation = navigationKey switch
             {
                 Key.Up => 1u,
                 Key.Down => 2u,
@@ -1051,6 +1249,19 @@ public partial class MainWindow : Window
                     e.Handled = true;
                     return;
             }
+        }
+
+        if (HandleFocusedSliderKey(e.Key))
+        {
+            e.Handled = true;
+            return;
+        }
+
+        if (PlaylistView.IsKeyboardFocusWithin && e.Key is
+            Key.Up or Key.Down or Key.PageUp or Key.PageDown or Key.Home or Key.End)
+        {
+            // Preserve native list selection and scrolling when the queue owns focus.
+            return;
         }
 
         switch (e.Key)
@@ -1119,7 +1330,7 @@ public partial class MainWindow : Window
                 e.Handled = true;
                 break;
             case Key.I:
-                SetInspectorVisibility(!_inspectorVisible);
+                ToggleInspector();
                 e.Handled = true;
                 break;
             case Key.B:
@@ -1139,6 +1350,103 @@ public partial class MainWindow : Window
                 e.Handled = true;
                 break;
         }
+    }
+
+    private bool HandleFocusedSliderKey(Key key)
+    {
+        if (TimelineSlider.IsKeyboardFocusWithin)
+        {
+            switch (key)
+            {
+                case Key.Left:
+                case Key.Down:
+                    SeekBy(Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? -30_000 : -10_000);
+                    return true;
+                case Key.Right:
+                case Key.Up:
+                    SeekBy(Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? 30_000 : 10_000);
+                    return true;
+                case Key.PageDown:
+                    SeekBy(-30_000);
+                    return true;
+                case Key.PageUp:
+                    SeekBy(30_000);
+                    return true;
+                case Key.Home when _mediaPlayer.Length > 0:
+                    _mediaPlayer.Time = 0;
+                    return true;
+                case Key.End when _mediaPlayer.Length > 0:
+                    _mediaPlayer.Time = _mediaPlayer.Length;
+                    return true;
+            }
+        }
+
+        if (VolumeSlider.IsKeyboardFocusWithin)
+        {
+            switch (key)
+            {
+                case Key.Left:
+                case Key.Down:
+                    SetVolume(VolumeSlider.Value - 1);
+                    return true;
+                case Key.Right:
+                case Key.Up:
+                    SetVolume(VolumeSlider.Value + 1);
+                    return true;
+                case Key.PageDown:
+                    SetVolume(VolumeSlider.Value - 5);
+                    return true;
+                case Key.PageUp:
+                    SetVolume(VolumeSlider.Value + 5);
+                    return true;
+                case Key.Home:
+                    SetVolume(0);
+                    return true;
+                case Key.End:
+                    SetVolume(100);
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void TransportLayout_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var useTwoRows = e.NewSize.Width < 730;
+        if (useTwoRows)
+        {
+            Grid.SetRow(PrimaryTransportPanel, 0);
+            Grid.SetColumn(PrimaryTransportPanel, 0);
+            Grid.SetColumnSpan(PrimaryTransportPanel, 6);
+            PrimaryTransportPanel.Margin = new Thickness(0);
+
+            Grid.SetRow(TransportToolsPanel, 1);
+            Grid.SetColumn(TransportToolsPanel, 0);
+            Grid.SetColumnSpan(TransportToolsPanel, 3);
+            TransportToolsPanel.Margin = new Thickness(0, 8, 0, 0);
+
+            Grid.SetRow(VolumeControlsPanel, 1);
+            Grid.SetColumn(VolumeControlsPanel, 3);
+            Grid.SetColumnSpan(VolumeControlsPanel, 3);
+            VolumeControlsPanel.Margin = new Thickness(0, 8, 0, 0);
+            return;
+        }
+
+        Grid.SetRow(TransportToolsPanel, 0);
+        Grid.SetColumn(TransportToolsPanel, 0);
+        Grid.SetColumnSpan(TransportToolsPanel, 2);
+        TransportToolsPanel.Margin = new Thickness(0);
+
+        Grid.SetRow(PrimaryTransportPanel, 0);
+        Grid.SetColumn(PrimaryTransportPanel, 2);
+        Grid.SetColumnSpan(PrimaryTransportPanel, 2);
+        PrimaryTransportPanel.Margin = new Thickness(0);
+
+        Grid.SetRow(VolumeControlsPanel, 0);
+        Grid.SetColumn(VolumeControlsPanel, 4);
+        Grid.SetColumnSpan(VolumeControlsPanel, 2);
+        VolumeControlsPanel.Margin = new Thickness(0);
     }
 
     private void SeekBy(long milliseconds)
@@ -1167,26 +1475,65 @@ public partial class MainWindow : Window
             ToggleCompact();
         }
 
-        _isFullscreen = !_isFullscreen;
-        if (_isFullscreen)
+        if (!_isFullscreen)
         {
             _restoreWindowState = WindowState;
+            _restoreBounds = WindowState == WindowState.Normal
+                ? new Rect(Left, Top, ActualWidth, ActualHeight)
+                : RestoreBounds;
+
+            var workArea = GetCurrentMonitorWorkArea();
+            _isFullscreen = true;
             SetSidebarVisibility(false);
             SetInspectorVisibility(false);
             TitleBarRow.Height = new GridLength(0);
             StatusBarRow.Height = new GridLength(0);
             WindowFrame.BorderThickness = new Thickness(0);
-            WindowState = WindowState.Maximized;
+            WindowState = WindowState.Normal;
+            ResizeMode = ResizeMode.NoResize;
+            Left = workArea.Left;
+            Top = workArea.Top;
+            Width = workArea.Width;
+            Height = workArea.Height;
         }
         else
         {
+            _isFullscreen = false;
             TitleBarRow.Height = new GridLength(46);
             StatusBarRow.Height = new GridLength(28);
+            ResizeMode = ResizeMode.CanResize;
             WindowFrame.BorderThickness = new Thickness(1);
-            WindowState = _restoreWindowState;
+            WindowState = WindowState.Normal;
+            Left = _restoreBounds.Left;
+            Top = _restoreBounds.Top;
+            Width = Math.Max(MinWidth, _restoreBounds.Width);
+            Height = Math.Max(MinHeight, _restoreBounds.Height);
             SetSidebarVisibility(_sidebarVisible, force: true);
             SetInspectorVisibility(_inspectorVisible, force: true);
+
+            if (_restoreWindowState == WindowState.Maximized)
+            {
+                WindowState = WindowState.Maximized;
+            }
         }
+    }
+
+    private Rect GetCurrentMonitorWorkArea()
+    {
+        var windowHandle = new WindowInteropHelper(this).Handle;
+        var monitorHandle = MonitorFromWindow(windowHandle, MonitorDefaultToNearest);
+        var monitorInfo = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+
+        if (monitorHandle == IntPtr.Zero || !GetMonitorInfo(monitorHandle, ref monitorInfo) ||
+            PresentationSource.FromVisual(this)?.CompositionTarget is not { } compositionTarget)
+        {
+            return SystemParameters.WorkArea;
+        }
+
+        var transform = compositionTarget.TransformFromDevice;
+        var topLeft = transform.Transform(new Point(monitorInfo.WorkArea.Left, monitorInfo.WorkArea.Top));
+        var bottomRight = transform.Transform(new Point(monitorInfo.WorkArea.Right, monitorInfo.WorkArea.Bottom));
+        return new Rect(topLeft, bottomRight);
     }
 
     private void ToggleCompact_Click(object sender, RoutedEventArgs e) => ToggleCompact();
@@ -1204,7 +1551,7 @@ public partial class MainWindow : Window
             _restoreBounds = RestoreBounds;
             _restoreWindowState = WindowState;
             WindowState = WindowState.Normal;
-            MinWidth = 480;
+            MinWidth = 560;
             MinHeight = 320;
             SetSidebarVisibility(false);
             SetInspectorVisibility(false);
@@ -1230,7 +1577,24 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ToggleInspector_Click(object sender, RoutedEventArgs e) => SetInspectorVisibility(false);
+    private void ToggleInspector_Click(object sender, RoutedEventArgs e) => ToggleInspector();
+
+    private void ToggleInspector()
+    {
+        var restoringFullLayout = _isFullscreen || _isCompact;
+
+        if (_isFullscreen)
+        {
+            ToggleFullscreen();
+        }
+
+        if (_isCompact)
+        {
+            ToggleCompact();
+        }
+
+        SetInspectorVisibility(restoringFullLayout || !_inspectorVisible);
+    }
 
     private void SetInspectorVisibility(bool visible, bool force = false)
     {
@@ -1244,6 +1608,7 @@ public partial class MainWindow : Window
         }
         InspectorColumn.Width = visible ? new GridLength(296) : new GridLength(0);
         InspectorPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        InspectorToggleText.Text = visible ? "Hide inspector" : "Show inspector";
     }
 
     private void SetSidebarVisibility(bool visible, bool force = false)
@@ -1275,11 +1640,47 @@ public partial class MainWindow : Window
         _settings.HardwareDecoding = HardwareDecodingCheckBox.IsChecked == true;
         _settings.AlwaysOnTop = AlwaysOnTopCheckBox.IsChecked == true;
         Topmost = _settings.AlwaysOnTop || _isCompact;
-        _settingsService.Save(_settings);
+        ScheduleSettingsSave();
 
         if (hardwareChanged)
         {
             ShowNotice("Hardware decoding change applies after restart");
+        }
+    }
+
+    private void ScheduleSettingsSave()
+    {
+        if (_isInitializing || _isClosing)
+        {
+            return;
+        }
+
+        var cancellation = new CancellationTokenSource();
+        var previousCancellation = _settingsSaveCancellation;
+        _settingsSaveCancellation = cancellation;
+        previousCancellation?.Cancel();
+        _ = SaveSettingsAfterDelayAsync(cancellation);
+    }
+
+    private async Task SaveSettingsAfterDelayAsync(CancellationTokenSource cancellation)
+    {
+        try
+        {
+            await Task.Delay(500, cancellation.Token);
+            await _settingsService.SaveAsync(_settings, cancellation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer settings snapshot or shutdown superseded this save.
+        }
+        finally
+        {
+            if (ReferenceEquals(_settingsSaveCancellation, cancellation))
+            {
+                _settingsSaveCancellation = null;
+            }
+
+            cancellation.Dispose();
         }
     }
 
@@ -1340,6 +1741,9 @@ public partial class MainWindow : Window
         MaximizeButton.Content = WindowState == WindowState.Maximized ? "\uE923" : "\uE922";
         WindowFrame.BorderThickness = WindowState == WindowState.Maximized || _isFullscreen ? new Thickness(0) : new Thickness(1);
     }
+
+    private void SetVideoSurfaceActive(bool active) =>
+        VideoOverlay.Background = active ? Brushes.Transparent : Brushes.Black;
 
     private Brush FindBrush(string resourceName, Brush fallback) => TryFindResource(resourceName) as Brush ?? fallback;
 

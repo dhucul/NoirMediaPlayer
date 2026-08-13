@@ -10,8 +10,10 @@
         <Color x:Key="LineColor">#FF242932</Color>
         <Color x:Key="AccentColor">#FFB7F02E</Color>
         <Color x:Key="AccentHoverColor">#FFC8FF48</Color>
-        <Color x:Key="TextColor">#FFF6F7F8</Color>
-        <Color x:Key="MutedTextColor">#FF9299A5</Color>
+        <Color x:Key="TextColor">#FFC7CBD1</Color>
+        <Color x:Key="ProminentTextColor">#FFDDE0E3</Color>
+        <Color x:Key="MutedTextColor">#FF858D98</Color>
+        <Color x:Key="DisabledTextColor">#FF5E6672</Color>
 
         <SolidColorBrush x:Key="InkBrush" Color="{StaticResource InkColor}" />
         <SolidColorBrush x:Key="PanelBrush" Color="{StaticResource PanelColor}" />
@@ -21,11 +23,14 @@
         <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}" />
         <SolidColorBrush x:Key="AccentHoverBrush" Color="{StaticResource AccentHoverColor}" />
         <SolidColorBrush x:Key="TextBrush" Color="{StaticResource TextColor}" />
+        <SolidColorBrush x:Key="ProminentTextBrush" Color="{StaticResource ProminentTextColor}" />
         <SolidColorBrush x:Key="MutedTextBrush" Color="{StaticResource MutedTextColor}" />
+        <SolidColorBrush x:Key="DisabledTextBrush" Color="{StaticResource DisabledTextColor}" />
 
         <!-- Keep native popup surfaces consistent with the dark theme. -->
         <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="{StaticResource PanelColor}" />
         <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="{StaticResource TextColor}" />
+        <SolidColorBrush x:Key="{x:Static SystemColors.GrayTextBrushKey}" Color="{StaticResource DisabledTextColor}" />
         <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#FF28321B" />
         <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="{StaticResource AccentColor}" />
 
@@ -48,7 +53,7 @@
         </Style>
 
         <Style x:Key="NoirButton" TargetType="Button">
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource ProminentTextBrush}" />
             <Setter Property="Background" Value="{StaticResource RaisedBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource LineBrush}" />
             <Setter Property="BorderThickness" Value="1" />
@@ -75,7 +80,9 @@
                                 <Setter TargetName="Chrome" Property="Opacity" Value="0.72" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="Chrome" Property="Opacity" Value="0.35" />
+                                <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
+                                <Setter TargetName="Chrome" Property="Background" Value="{StaticResource PanelBrush}" />
+                                <Setter TargetName="Chrome" Property="BorderBrush" Value="{StaticResource LineBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -85,7 +92,7 @@
 
         <Style x:Key="AccentButton" TargetType="Button" BasedOn="{StaticResource NoirButton}">
             <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-            <Setter Property="Foreground" Value="#FF080A05" />
+            <Setter Property="Foreground" Value="#FF202514" />
             <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
         </Style>
 
@@ -121,16 +128,21 @@
         </Style>
 
         <Style TargetType="TextBox">
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource ProminentTextBrush}" />
             <Setter Property="Background" Value="{StaticResource RaisedBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource LineBrush}" />
             <Setter Property="CaretBrush" Value="{StaticResource AccentBrush}" />
             <Setter Property="Padding" Value="12,9" />
             <Setter Property="FontSize" Value="13" />
+            <Style.Triggers>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
         <Style TargetType="ComboBox">
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource ProminentTextBrush}" />
             <Setter Property="Background" Value="{StaticResource RaisedBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource LineBrush}" />
             <Setter Property="BorderThickness" Value="1" />
@@ -244,7 +256,9 @@
                                 <Setter TargetName="DropDown" Property="MinHeight" Value="42" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="ControlChrome" Property="Opacity" Value="0.4" />
+                                <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
+                                <Setter TargetName="ControlChrome" Property="Background" Value="{StaticResource PanelBrush}" />
+                                <Setter TargetName="DropDownArrow" Property="Stroke" Value="{StaticResource DisabledTextBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -253,7 +267,7 @@
         </Style>
 
         <Style TargetType="ComboBoxItem">
-            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource ProminentTextBrush}" />
             <Setter Property="Background" Value="{StaticResource PanelBrush}" />
             <Setter Property="Padding" Value="11,8" />
             <Setter Property="MinHeight" Value="34" />
@@ -277,7 +291,7 @@
                                 <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter Property="Opacity" Value="0.38" />
+                                <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -288,6 +302,11 @@
         <Style TargetType="CheckBox">
             <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Style.Triggers>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
         <Style TargetType="Slider">
@@ -318,6 +337,9 @@
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
                                 <Setter TargetName="ItemBorder" Property="Background" Value="#FF20251A" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>

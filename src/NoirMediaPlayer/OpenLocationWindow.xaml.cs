@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 
 namespace NoirMediaPlayer;
@@ -43,11 +44,18 @@ public partial class OpenLocationWindow : Window
     {
         if (e.Key == Key.Enter)
         {
+            if (Keyboard.FocusedElement is ButtonBase)
+            {
+                return;
+            }
+
             Open_Click(this, new RoutedEventArgs());
+            e.Handled = true;
         }
         else if (e.Key == Key.Escape)
         {
             DialogResult = false;
+            e.Handled = true;
         }
     }
 }

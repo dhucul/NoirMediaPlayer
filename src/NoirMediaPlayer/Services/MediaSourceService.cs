@@ -23,7 +23,7 @@ public static class MediaSourceService
 
     public static bool IsSupported(string path) => SupportedExtensions.Contains(Path.GetExtension(path));
 
-    public static IEnumerable<string> EnumerateFolder(string folder)
+    public static IEnumerable<string> EnumerateFolder(string folder, CancellationToken cancellationToken = default)
     {
         IEnumerable<string> files;
         try
@@ -40,8 +40,25 @@ public static class MediaSourceService
             yield break;
         }
 
-        foreach (var current in files)
+        using var enumerator = files.GetEnumerator();
+        while (true)
         {
+            string current;
+            try
+            {
+                if (!enumerator.MoveNext())
+                {
+                    yield break;
+                }
+
+                current = enumerator.Current;
+            }
+            catch
+            {
+                yield break;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
             if (IsSupported(current))
             {
                 yield return current;
@@ -49,13 +66,14 @@ public static class MediaSourceService
         }
     }
 
-    public static IEnumerable<string> ExpandFiles(IEnumerable<string> paths)
+    public static IEnumerable<string> ExpandFiles(IEnumerable<string> paths, CancellationToken cancellationToken = default)
     {
         foreach (var path in paths)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (Directory.Exists(path))
             {
-                foreach (var mediaPath in EnumerateFolder(path))
+                foreach (var mediaPath in EnumerateFolder(path, cancellationToken))
                 {
                     yield return mediaPath;
                 }
@@ -70,7 +88,7 @@ public static class MediaSourceService
 
             if (PlaylistExtensions.Contains(Path.GetExtension(path)))
             {
-                foreach (var playlistPath in ReadM3u(path))
+                foreach (var playlistPath in ReadM3u(path, cancellationToken))
                 {
                     yield return playlistPath;
                 }
@@ -99,7 +117,7 @@ public static class MediaSourceService
         IsNetwork = true
     };
 
-    private static IEnumerable<string> ReadM3u(string playlistPath)
+    private static IEnumerable<string> ReadM3u(string playlistPath, CancellationToken cancellationToken)
     {
         var parent = Path.GetDirectoryName(playlistPath) ?? Environment.CurrentDirectory;
         IEnumerable<string> lines;
@@ -112,8 +130,25 @@ public static class MediaSourceService
             yield break;
         }
 
-        foreach (var rawLine in lines)
+        using var enumerator = lines.GetEnumerator();
+        while (true)
         {
+            string rawLine;
+            try
+            {
+                if (!enumerator.MoveNext())
+                {
+                    yield break;
+                }
+
+                rawLine = enumerator.Current;
+            }
+            catch
+            {
+                yield break;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
             var line = rawLine.Trim();
             if (line.Length == 0 || line.StartsWith('#'))
             {

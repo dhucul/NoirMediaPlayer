@@ -10,14 +10,15 @@ public sealed record DiscInfo(string Root, string Label, string Source, string F
 
 public static class DiscService
 {
-    public static IReadOnlyList<DiscInfo> FindVideoDiscs()
+    public static IReadOnlyList<DiscInfo> FindVideoDiscs(CancellationToken cancellationToken = default)
     {
         var result = new List<DiscInfo>();
-        foreach (var drive in DriveInfo.GetDrives().Where(item => item.DriveType == DriveType.CDRom))
+        foreach (var drive in DriveInfo.GetDrives())
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                if (!drive.IsReady)
+                if (drive.DriveType != DriveType.CDRom || !drive.IsReady)
                 {
                     continue;
                 }
