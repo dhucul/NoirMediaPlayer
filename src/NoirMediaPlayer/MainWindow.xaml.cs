@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Channels;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -25,6 +26,10 @@ public partial class MainWindow : Window
 {
     private readonly ObservableCollection<PlaylistItem> _playlist = [];
     private readonly SettingsService _settingsService = new();
+    private readonly SemaphoreSlim _sourceImportGate = new(1, 1);
+    private readonly SemaphoreSlim _discScanGate = new(1, 1);
+    private readonly CancellationTokenSource _lifetimeCancellation = new();
+    private readonly Stopwatch _positionPersistClock = Stopwatch.StartNew();
     private readonly DispatcherTimer _uiTimer;
     private readonly DispatcherTimer _noticeTimer;
     private readonly Random _random = new();
@@ -38,22 +43,38 @@ public partial class MainWindow : Window
     private bool _isPlaying;
     private bool _isScrubbing;
     private bool _isInitializing = true;
-    private bool _isClosing;
+    private volatile bool _isClosing;
     private bool _isFullscreen;
     private bool _isCompact;
+    private bool _shutdownStarted;
+    private bool _shutdownComplete;
+    private bool _playbackDisposed;
     private bool _inspectorVisible = true;
     private bool _sidebarVisible = true;
     private int _currentIndex = -1;
     private int _rotation;
     private long _pendingResumePosition;
-    private long _lastPersistedAt;
+    private long _playbackGeneration;
+    private Action? _detachPlaybackEvents;
     private CancellationTokenSource? _sourceImportCancellation;
     private CancellationTokenSource? _discScanCancellation;
     private CancellationTokenSource? _settingsSaveCancellation;
+    private CancellationTokenSource? _networkStartupCancellation;
+    private Task? _sourceImportWorker;
+    private Task? _discScanWorker;
+    private Task? _settingsSaveTask;
+    private Task? _playlistSaveTask;
     private Rect _restoreBounds;
     private WindowState _restoreWindowState;
 
     private const int ImportBatchSize = 100;
+    private const int ImportChannelCapacity = 256;
+    private const int MaxPlaylistItems = 10_000;
+    private static readonly TimeSpan ImportTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan DiscScanTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan NetworkStartupTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan FileWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(2);
 
     private const uint MonitorDefaultToNearest = 2;
 
@@ -122,47 +143,83 @@ public partial class MainWindow : Window
             PlaybackNotice.Visibility = Visibility.Collapsed;
         };
 
-        WirePlayerEvents();
         ApplySettingsToControls();
         _isInitializing = false;
     }
 
-    private void WirePlayerEvents()
+    private void AttachPlaybackEvents(long generation)
     {
-        _mediaPlayer.Playing += (_, _) => Dispatcher.BeginInvoke(() =>
+        DetachPlaybackEvents();
+
+        void Dispatch(Action action)
         {
+            if (_isClosing || generation != Interlocked.Read(ref _playbackGeneration))
+            {
+                return;
+            }
+
+            _ = Dispatcher.BeginInvoke(() =>
+            {
+                if (_isClosing || generation != Interlocked.Read(ref _playbackGeneration))
+                {
+                    return;
+                }
+
+                try
+                {
+                    action();
+                }
+                catch (Exception exception)
+                {
+                    Debug.WriteLine(exception);
+                }
+            });
+        }
+
+        void Playing(object? sender, EventArgs args) => Dispatch(() =>
+        {
+            if (_mediaPlayer.State is not (VLCState.Playing or VLCState.Buffering))
+            {
+                return;
+            }
+
+            CancelNetworkStartupWatchdog();
             _isPlaying = true;
             PlayPauseButton.Content = "\uE769";
             EngineStatusText.Text = "PLAYING";
             EngineStatusDot.Fill = FindBrush("AccentBrush", Brushes.DarkSeaGreen);
-            StatusText.Text = _currentItem is null ? "Playing" : $"Playing · {_currentItem.Title}";
+            StatusText.Text = _currentItem is null ? "Playing" : $"Playing - {_currentItem.Title}";
             StatusDot.Fill = FindBrush("AccentBrush", Brushes.DarkSeaGreen);
             EmptyPlayerPanel.Visibility = Visibility.Collapsed;
             SetVideoSurfaceActive(true);
             _mediaPlayer.SetRate(_settings.PlaybackRate);
-
-            if (_pendingResumePosition > 0 && _mediaPlayer.Length > _pendingResumePosition + 10_000)
-            {
-                var resumeAt = _pendingResumePosition;
-                _pendingResumePosition = 0;
-                _mediaPlayer.Time = resumeAt;
-                ShowNotice($"Resumed at {FormatTime(resumeAt)}");
-            }
-
+            TryApplyPendingResume(generation, _mediaPlayer.Length);
             RefreshTrackSelectors();
             RefreshVideoInfo();
         });
 
-        _mediaPlayer.Paused += (_, _) => Dispatcher.BeginInvoke(() =>
+        void Paused(object? sender, EventArgs args) => Dispatch(() =>
         {
+            if (_mediaPlayer.State != VLCState.Paused)
+            {
+                return;
+            }
+
+            CancelNetworkStartupWatchdog();
             _isPlaying = false;
             PlayPauseButton.Content = "\uE768";
             EngineStatusText.Text = "PAUSED";
             StatusText.Text = "Paused";
         });
 
-        _mediaPlayer.Stopped += (_, _) => Dispatcher.BeginInvoke(() =>
+        void Stopped(object? sender, EventArgs args) => Dispatch(() =>
         {
+            if (_mediaPlayer.State is not (VLCState.Stopped or VLCState.NothingSpecial))
+            {
+                return;
+            }
+
+            CancelNetworkStartupWatchdog();
             _isPlaying = false;
             PlayPauseButton.Content = "\uE768";
             EngineStatusText.Text = "STOPPED";
@@ -170,9 +227,22 @@ public partial class MainWindow : Window
             SetVideoSurfaceActive(false);
         });
 
-        _mediaPlayer.EndReached += (_, _) => Dispatcher.BeginInvoke(HandleMediaEnded);
-        _mediaPlayer.EncounteredError += (_, _) => Dispatcher.BeginInvoke(() =>
+        void EndReached(object? sender, EventArgs args) => Dispatch(() =>
         {
+            if (_mediaPlayer.State == VLCState.Ended)
+            {
+                HandleMediaEnded(generation);
+            }
+        });
+
+        void EncounteredError(object? sender, EventArgs args) => Dispatch(() =>
+        {
+            if (_mediaPlayer.State != VLCState.Error)
+            {
+                return;
+            }
+
+            CancelNetworkStartupWatchdog();
             _isPlaying = false;
             PlayPauseButton.Content = "\uE768";
             EngineStatusText.Text = "PLAYBACK ERROR";
@@ -180,15 +250,51 @@ public partial class MainWindow : Window
             StatusText.Text = "This source could not be played";
             StatusDot.Fill = Brushes.OrangeRed;
             SetVideoSurfaceActive(false);
-            ShowNotice("Playback error — check the source or disc");
+            ShowNotice("Playback error - check the source or disc");
         });
-        _mediaPlayer.Buffering += (_, args) => Dispatcher.BeginInvoke(() =>
+
+        void Buffering(object? sender, MediaPlayerBufferingEventArgs args)
         {
-            if (args.Cache < 100f)
+            var cache = args.Cache;
+            Dispatch(() =>
             {
-                EngineStatusText.Text = $"BUFFERING {args.Cache:0}%";
-            }
-        });
+                if (cache < 100f)
+                {
+                    EngineStatusText.Text = $"BUFFERING {cache:0}%";
+                }
+            });
+        }
+
+        void LengthChanged(object? sender, MediaPlayerLengthChangedEventArgs args)
+        {
+            var length = args.Length;
+            Dispatch(() => TryApplyPendingResume(generation, length));
+        }
+
+        _mediaPlayer.Playing += Playing;
+        _mediaPlayer.Paused += Paused;
+        _mediaPlayer.Stopped += Stopped;
+        _mediaPlayer.EndReached += EndReached;
+        _mediaPlayer.EncounteredError += EncounteredError;
+        _mediaPlayer.Buffering += Buffering;
+        _mediaPlayer.LengthChanged += LengthChanged;
+
+        _detachPlaybackEvents = () =>
+        {
+            _mediaPlayer.Playing -= Playing;
+            _mediaPlayer.Paused -= Paused;
+            _mediaPlayer.Stopped -= Stopped;
+            _mediaPlayer.EndReached -= EndReached;
+            _mediaPlayer.EncounteredError -= EncounteredError;
+            _mediaPlayer.Buffering -= Buffering;
+            _mediaPlayer.LengthChanged -= LengthChanged;
+        };
+    }
+
+    private void DetachPlaybackEvents()
+    {
+        _detachPlaybackEvents?.Invoke();
+        _detachPlaybackEvents = null;
     }
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
@@ -211,20 +317,83 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Window_Closing(object? sender, CancelEventArgs e)
+    private async void Window_Closing(object? sender, CancelEventArgs e)
     {
+        if (_shutdownComplete)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        if (_shutdownStarted)
+        {
+            return;
+        }
+
+        _shutdownStarted = true;
         _isClosing = true;
-        _sourceImportCancellation?.Cancel();
-        _discScanCancellation?.Cancel();
-        _settingsSaveCancellation?.Cancel();
+        IsEnabled = false;
         PersistCurrentPosition(force: true);
         _settings.Volume = (int)VolumeSlider.Value;
         _settings.IsMuted = _mediaPlayer.Mute;
-        _settingsService.Save(_settings);
+
+        _lifetimeCancellation.Cancel();
+        _sourceImportCancellation?.Cancel();
+        _discScanCancellation?.Cancel();
+        _settingsSaveCancellation?.Cancel();
+        CancelNetworkStartupWatchdog();
         _uiTimer.Stop();
-        _mediaPlayer.Stop();
+        _noticeTimer.Stop();
+        DisposePlaybackResources();
+
+        var activeOperations = new[]
+        {
+            _sourceImportWorker,
+            _discScanWorker,
+            _settingsSaveTask,
+            _playlistSaveTask
+        }.Where(task => task is not null).Cast<Task>().ToArray();
+
+        if (activeOperations.Length > 0)
+        {
+            try
+            {
+                var completion = Task.WhenAll(activeOperations);
+                if (await Task.WhenAny(completion, Task.Delay(ShutdownTimeout)) == completion)
+                {
+                    await completion;
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.WriteLine(exception);
+            }
+        }
+
+        using var saveTimeout = new CancellationTokenSource(ShutdownTimeout);
+        try
+        {
+            await _settingsService.SaveAsync(_settings, saveTimeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Debug.WriteLine("Settings save timed out during shutdown.");
+        }
+
+        _shutdownComplete = true;
+        Close();
+    }
+
+    private void DisposePlaybackResources()
+    {
+        if (_playbackDisposed)
+        {
+            return;
+        }
+
+        _playbackDisposed = true;
+        ReleaseCurrentMedia();
         VideoView.MediaPlayer = null;
-        _currentMedia?.Dispose();
         _mediaPlayer.Dispose();
         _libVlc.Dispose();
     }
@@ -290,15 +459,22 @@ public partial class MainWindow : Window
 
     private async void OpenDisc_Click(object sender, RoutedEventArgs e)
     {
-        var cancellation = new CancellationTokenSource();
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+        cancellation.CancelAfter(DiscScanTimeout);
         var previousCancellation = _discScanCancellation;
         _discScanCancellation = cancellation;
         previousCancellation?.Cancel();
+        var gateEntered = false;
+        Task<IReadOnlyList<DiscInfo>>? scanTask = null;
         StatusText.Text = "Looking for optical discs…";
 
         try
         {
-            var discs = await Task.Run(() => DiscService.FindVideoDiscs(cancellation.Token), cancellation.Token);
+            await _discScanGate.WaitAsync(cancellation.Token);
+            gateEntered = true;
+            scanTask = Task.Run(() => DiscService.FindVideoDiscs(cancellation.Token));
+            _discScanWorker = scanTask;
+            var discs = await scanTask;
             cancellation.Token.ThrowIfCancellationRequested();
             if (discs.Count == 0)
             {
@@ -326,9 +502,19 @@ public partial class MainWindow : Window
         }
         finally
         {
+            if (ReferenceEquals(_discScanWorker, scanTask))
+            {
+                _discScanWorker = null;
+            }
+
             if (ReferenceEquals(_discScanCancellation, cancellation))
             {
                 _discScanCancellation = null;
+            }
+
+            if (gateEntered)
+            {
+                _discScanGate.Release();
             }
 
             cancellation.Dispose();
@@ -357,45 +543,61 @@ public partial class MainWindow : Window
             return 0;
         }
 
-        var cancellation = new CancellationTokenSource();
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+        cancellation.CancelAfter(ImportTimeout);
         var previousCancellation = _sourceImportCancellation;
         _sourceImportCancellation = cancellation;
         previousCancellation?.Cancel();
 
-        var existingSources = new HashSet<string>(_playlistSources, StringComparer.OrdinalIgnoreCase);
         PlaylistItem? firstAdded = null;
         var added = 0;
+        var gateEntered = false;
+        Task? producer = null;
         StatusText.Text = "Scanning media…";
 
         try
         {
-            var items = await Task.Run(
-                () => BuildImportItems(sourceList, existingSources, cancellation.Token),
-                cancellation.Token);
+            await _sourceImportGate.WaitAsync(cancellation.Token);
+            gateEntered = true;
             cancellation.Token.ThrowIfCancellationRequested();
 
-            for (var offset = 0; offset < items.Count; offset += ImportBatchSize)
+            var existingSources = new HashSet<string>(_playlistSources, StringComparer.OrdinalIgnoreCase);
+            var maximumNewItems = Math.Max(0, MaxPlaylistItems - existingSources.Count);
+            var channel = Channel.CreateBounded<PlaylistItem>(new BoundedChannelOptions(ImportChannelCapacity)
             {
-                cancellation.Token.ThrowIfCancellationRequested();
-                var batchEnd = Math.Min(offset + ImportBatchSize, items.Count);
-                for (var itemIndex = offset; itemIndex < batchEnd; itemIndex++)
-                {
-                    var item = items[itemIndex];
-                    if (!_playlistSources.Add(item.Source))
-                    {
-                        continue;
-                    }
+                SingleReader = true,
+                SingleWriter = true,
+                FullMode = BoundedChannelFullMode.Wait
+            });
+            producer = Task.Run(() => ProduceImportItemsAsync(
+                channel.Writer,
+                sourceList,
+                existingSources,
+                maximumNewItems,
+                cancellation.Token));
+            _sourceImportWorker = producer;
 
-                    _playlist.Add(item);
-                    firstAdded ??= item;
-                    added++;
+            var batchCount = 0;
+            await foreach (var item in channel.Reader.ReadAllAsync(cancellation.Token))
+            {
+                if (_playlist.Count >= MaxPlaylistItems || !_playlistSources.Add(item.Source))
+                {
+                    continue;
                 }
 
-                if (offset + ImportBatchSize < items.Count)
+                _playlist.Add(item);
+                firstAdded ??= item;
+                added++;
+                batchCount++;
+                if (batchCount >= ImportBatchSize)
                 {
+                    batchCount = 0;
+                    RefreshQueueState();
                     await Dispatcher.Yield(DispatcherPriority.Background);
                 }
             }
+
+            await producer;
 
             RefreshQueueState();
             if (firstAdded is not null && playFirst)
@@ -436,7 +638,29 @@ public partial class MainWindow : Window
         }
         finally
         {
-            if (added > 0)
+            cancellation.Cancel();
+            if (producer is not null)
+            {
+                try
+                {
+                    await producer;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Cancellation is the normal completion path for a superseded scan.
+                }
+                catch (Exception exception)
+                {
+                    Debug.WriteLine(exception);
+                }
+            }
+
+            if (ReferenceEquals(_sourceImportWorker, producer))
+            {
+                _sourceImportWorker = null;
+            }
+
+            if (added > 0 && !_isClosing)
             {
                 RefreshQueueState();
             }
@@ -446,38 +670,83 @@ public partial class MainWindow : Window
                 _sourceImportCancellation = null;
             }
 
+            if (gateEntered)
+            {
+                _sourceImportGate.Release();
+            }
+
             cancellation.Dispose();
         }
 
         return added;
     }
 
-    private static List<PlaylistItem> BuildImportItems(
+    private static async Task ProduceImportItemsAsync(
+        ChannelWriter<PlaylistItem> writer,
         IReadOnlyList<string> sources,
         HashSet<string> existingSources,
+        int maximumItems,
         CancellationToken cancellationToken)
     {
+        Exception? completionError = null;
+        try
+        {
+            foreach (var item in EnumerateImportItems(sources, existingSources, maximumItems, cancellationToken))
+            {
+                await writer.WriteAsync(item, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception)
+        {
+            completionError = exception;
+            throw;
+        }
+        finally
+        {
+            writer.TryComplete(completionError);
+        }
+    }
+
+    private static IEnumerable<PlaylistItem> EnumerateImportItems(
+        IReadOnlyList<string> sources,
+        HashSet<string> existingSources,
+        int maximumItems,
+        CancellationToken cancellationToken)
+    {
+        if (maximumItems <= 0)
+        {
+            yield break;
+        }
+
         if (sources.Count == 1 && Directory.Exists(sources[0]) &&
             DiscService.CreateFromFolder(sources[0]) is { } discItem)
         {
-            return existingSources.Add(discItem.Source) ? [discItem] : [];
+            if (existingSources.Add(discItem.Source))
+            {
+                yield return discItem;
+            }
+
+            yield break;
         }
 
-        var result = new List<PlaylistItem>();
+        var yielded = 0;
         foreach (var source in MediaSourceService.ExpandFiles(sources, cancellationToken))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var item = Uri.TryCreate(source, UriKind.Absolute, out var uri) && !uri.IsFile
-                ? MediaSourceService.CreateNetworkItem(source)
+            var item = MediaSourceService.TryNormalizeNetworkLocation(source, out var networkLocation)
+                ? MediaSourceService.CreateNetworkItem(networkLocation)
                 : MediaSourceService.CreateFileItem(source);
 
             if (existingSources.Add(item.Source))
             {
-                result.Add(item);
+                yield return item;
+                yielded++;
+                if (yielded >= maximumItems)
+                {
+                    yield break;
+                }
             }
         }
-
-        return result;
     }
 
     private void AddItem(PlaylistItem item, bool playNow)
@@ -487,6 +756,12 @@ public partial class MainWindow : Window
 
         if (existing is null)
         {
+            if (_playlist.Count >= MaxPlaylistItems)
+            {
+                ShowNotice($"Queue limit reached ({MaxPlaylistItems:N0} items)");
+                return;
+            }
+
             _playlistSources.Add(item.Source);
             _playlist.Add(item);
             existing = item;
@@ -499,8 +774,13 @@ public partial class MainWindow : Window
         }
     }
 
-    private void PlayItem(PlaylistItem item, bool allowResume = true)
+    private void PlayItem(PlaylistItem item, bool allowResume = true, long requestedPosition = -1)
     {
+        if (_isClosing || _playbackDisposed)
+        {
+            return;
+        }
+
         PersistCurrentPosition(force: true);
 
         if (_currentItem is not null)
@@ -508,14 +788,29 @@ public partial class MainWindow : Window
             _currentItem.IsPlaying = false;
         }
 
+        ReleaseCurrentMedia();
+
         _currentItem = item;
         _currentIndex = _playlist.IndexOf(item);
         _currentItem.IsPlaying = true;
         PlaylistView.SelectedItem = item;
         PlaylistView.ScrollIntoView(item);
+        UpdateNowPlaying(item);
+        SetVideoSurfaceActive(false);
 
-        _currentMedia?.Dispose();
-        _currentMedia = CreateMedia(item.Source);
+        try
+        {
+            _currentMedia = CreateMedia(item);
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+            item.IsPlaying = false;
+            EngineStatusText.Text = "SOURCE ERROR";
+            StatusText.Text = "The selected source is unavailable";
+            ShowNotice("The selected source could not be opened");
+            return;
+        }
         if (_rotation != 0)
         {
             _currentMedia.AddOption(":video-filter=transform");
@@ -523,30 +818,176 @@ public partial class MainWindow : Window
         }
 
         _pendingResumePosition = 0;
-        if (allowResume && _settings.RememberPosition &&
+        if (requestedPosition >= 0)
+        {
+            _pendingResumePosition = requestedPosition;
+        }
+        else if (allowResume && _settings.RememberPosition &&
             _settings.ResumePositions.TryGetValue(item.Source, out var savedPosition) && savedPosition >= 10_000)
         {
             _pendingResumePosition = savedPosition;
         }
 
-        UpdateNowPlaying(item);
-        SetVideoSurfaceActive(false);
+        var generation = Interlocked.Increment(ref _playbackGeneration);
+        AttachPlaybackEvents(generation);
+        _positionPersistClock.Restart();
         AddRecent(item.Source);
         ScheduleSettingsSave();
         EngineStatusText.Text = item.IsDisc ? "READING DISC" : item.IsNetwork ? "CONNECTING" : "OPENING";
         EngineStatusDot.Fill = Brushes.Goldenrod;
         StatusText.Text = $"Opening · {item.Title}";
-        _mediaPlayer.Play(_currentMedia);
+        try
+        {
+            if (!_mediaPlayer.Play(_currentMedia))
+            {
+                throw new InvalidOperationException("LibVLC rejected the media source.");
+            }
+
+            StartNetworkStartupWatchdog(item, generation);
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+            item.IsPlaying = false;
+            ReleaseCurrentMedia();
+            EngineStatusText.Text = "PLAYBACK ERROR";
+            StatusText.Text = "The selected source could not be played";
+            ShowNotice("The selected source could not be played");
+        }
     }
 
-    private Media CreateMedia(string source)
+    private Media CreateMedia(PlaylistItem item)
     {
-        if (File.Exists(source))
+        if (item.IsDisc || item.IsNetwork)
         {
-            return new Media(_libVlc, source, FromType.FromPath);
+            return new Media(_libVlc, item.Source, FromType.FromLocation);
         }
 
-        return new Media(_libVlc, source, FromType.FromLocation);
+        if (!File.Exists(item.Source))
+        {
+            throw new FileNotFoundException("The media file no longer exists.", item.Source);
+        }
+
+        return new Media(_libVlc, item.Source, FromType.FromPath);
+    }
+
+    private void ReleaseCurrentMedia()
+    {
+        Interlocked.Increment(ref _playbackGeneration);
+        try
+        {
+            DetachPlaybackEvents();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The native player is already gone during a repeated shutdown path.
+        }
+
+        CancelNetworkStartupWatchdog();
+        try
+        {
+            _mediaPlayer.Stop();
+            _mediaPlayer.Media = null;
+        }
+        catch (ObjectDisposedException)
+        {
+            // Disposal is idempotent from the window's perspective.
+        }
+
+        _currentMedia?.Dispose();
+        _currentMedia = null;
+        _pendingResumePosition = 0;
+        _isPlaying = false;
+    }
+
+    private void TryApplyPendingResume(long generation, long length)
+    {
+        if (_pendingResumePosition <= 0 ||
+            generation != Interlocked.Read(ref _playbackGeneration) ||
+            length <= 0)
+        {
+            return;
+        }
+
+        var resumeAt = _pendingResumePosition;
+        _pendingResumePosition = 0;
+        if (length > resumeAt + 10_000)
+        {
+            _mediaPlayer.Time = resumeAt;
+            ShowNotice($"Resumed at {FormatTime(resumeAt)}");
+        }
+        else if (_currentItem is not null)
+        {
+            _settings.ResumePositions.Remove(_currentItem.Source);
+            ScheduleSettingsSave();
+        }
+    }
+
+    private void StartNetworkStartupWatchdog(PlaylistItem item, long generation)
+    {
+        CancelNetworkStartupWatchdog();
+        if (!item.IsNetwork)
+        {
+            return;
+        }
+
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+        _networkStartupCancellation = cancellation;
+        _ = MonitorNetworkStartupAsync(item, generation, cancellation.Token);
+    }
+
+    private async Task MonitorNetworkStartupAsync(
+        PlaylistItem item,
+        long generation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(NetworkStartupTimeout, cancellationToken).ConfigureAwait(false);
+            if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            {
+                return;
+            }
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (_isClosing ||
+                    generation != Interlocked.Read(ref _playbackGeneration) ||
+                    !ReferenceEquals(_currentItem, item) ||
+                    _isPlaying)
+                {
+                    return;
+                }
+
+                item.IsPlaying = false;
+                ReleaseCurrentMedia();
+                EngineStatusText.Text = "CONNECTION TIMEOUT";
+                EngineStatusDot.Fill = Brushes.OrangeRed;
+                StatusText.Text = "The network stream did not respond";
+                ShowNotice("Network connection timed out");
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            // Playback started, changed, or the application is shutting down.
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+        }
+    }
+
+    private void CancelNetworkStartupWatchdog()
+    {
+        var cancellation = _networkStartupCancellation;
+        _networkStartupCancellation = null;
+        if (cancellation is null)
+        {
+            return;
+        }
+
+        cancellation.Cancel();
+        cancellation.Dispose();
     }
 
     private void UpdateNowPlaying(PlaylistItem item)
@@ -624,11 +1065,11 @@ public partial class MainWindow : Window
         PlayItem(_playlist[nextIndex]);
     }
 
-    private void PlayNext(bool userInitiated)
+    private bool PlayNext(bool userInitiated)
     {
         if (_playlist.Count == 0)
         {
-            return;
+            return false;
         }
 
         int nextIndex;
@@ -650,16 +1091,23 @@ public partial class MainWindow : Window
                 }
                 else
                 {
-                    return;
+                    return false;
                 }
             }
         }
 
         PlayItem(_playlist[nextIndex]);
+        return true;
     }
 
-    private void HandleMediaEnded()
+    private void HandleMediaEnded(long generation)
     {
+        if (_isClosing || generation != Interlocked.Read(ref _playbackGeneration))
+        {
+            return;
+        }
+
+        _isPlaying = false;
         if (_currentItem is not null)
         {
             _settings.ResumePositions.Remove(_currentItem.Source);
@@ -672,17 +1120,16 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_settings.AutoPlayNext || _settings.RepeatMode == "All")
+        if ((_settings.AutoPlayNext || _settings.RepeatMode == "All") &&
+            PlayNext(userInitiated: false))
         {
-            PlayNext(userInitiated: false);
+            return;
         }
-        else
-        {
-            _isPlaying = false;
-            PlayPauseButton.Content = "\uE768";
-            StatusText.Text = "Playback finished";
-            SetVideoSurfaceActive(false);
-        }
+
+        PlayPauseButton.Content = "\uE768";
+        EngineStatusText.Text = "FINISHED";
+        StatusText.Text = "Playback finished";
+        SetVideoSurfaceActive(false);
     }
 
     private void Timeline_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e) => _isScrubbing = true;
@@ -706,6 +1153,7 @@ public partial class MainWindow : Window
 
         var length = Math.Max(0, _mediaPlayer.Length);
         var time = Math.Max(0, _mediaPlayer.Time);
+        TryApplyPendingResume(Interlocked.Read(ref _playbackGeneration), length);
         if (!_isScrubbing && length > 0)
         {
             TimelineSlider.Maximum = length;
@@ -720,7 +1168,8 @@ public partial class MainWindow : Window
             _currentItem.DurationMilliseconds = length;
         }
 
-        if (_isPlaying && _settings.RememberPosition && time - _lastPersistedAt >= 5_000)
+        if (_isPlaying && _settings.RememberPosition &&
+            _positionPersistClock.Elapsed >= TimeSpan.FromSeconds(5))
         {
             PersistCurrentPosition(force: false);
         }
@@ -749,7 +1198,7 @@ public partial class MainWindow : Window
             _settings.ResumePositions.Remove(_currentItem.Source);
         }
 
-        _lastPersistedAt = time;
+        _positionPersistClock.Restart();
         if (force)
         {
             TrimResumeHistory();
@@ -992,8 +1441,7 @@ public partial class MainWindow : Window
 
         var position = _mediaPlayer.Time;
         _rotation = (_rotation + 90) % 360;
-        PlayItem(_currentItem, allowResume: false);
-        _pendingResumePosition = position;
+        PlayItem(_currentItem, allowResume: false, requestedPosition: position);
         ShowNotice(_rotation == 0 ? "Rotation reset" : $"Rotated {_rotation}°");
     }
 
@@ -1082,14 +1530,24 @@ public partial class MainWindow : Window
         }
 
         var wasCurrent = ReferenceEquals(item, _currentItem);
+        if (wasCurrent)
+        {
+            PersistCurrentPosition(force: true);
+        }
+
+        item.IsPlaying = false;
         _playlist.Remove(item);
         _playlistSources.Remove(item.Source);
         if (wasCurrent)
         {
-            _mediaPlayer.Stop();
+            ReleaseCurrentMedia();
             _currentItem = null;
             _currentIndex = -1;
             ResetNowPlaying();
+        }
+        else if (_currentItem is not null)
+        {
+            _currentIndex = _playlist.IndexOf(_currentItem);
         }
 
         RefreshQueueState();
@@ -1098,7 +1556,8 @@ public partial class MainWindow : Window
     private void ClearPlaylist_Click(object sender, RoutedEventArgs e)
     {
         _sourceImportCancellation?.Cancel();
-        _mediaPlayer.Stop();
+        PersistCurrentPosition(force: true);
+        ReleaseCurrentMedia();
         foreach (var item in _playlist)
         {
             item.IsPlaying = false;
@@ -1133,28 +1592,100 @@ public partial class MainWindow : Window
             return;
         }
 
-        var lines = new List<string> { "#EXTM3U" };
-        foreach (var item in _playlist)
-        {
-            lines.Add($"#EXTINF:{(item.DurationMilliseconds > 0 ? item.DurationMilliseconds / 1000 : -1)},{item.Title}");
-            lines.Add(item.Source);
-        }
+        var items = _playlist.ToArray();
+        using var writeCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+        writeCancellation.CancelAfter(FileWriteTimeout);
         SavePlaylistButton.IsEnabled = false;
         StatusText.Text = "Saving playlist…";
         try
         {
-            await File.WriteAllLinesAsync(dialog.FileName, lines, new UTF8Encoding(false));
+            var saveTask = WritePlaylistAsync(dialog.FileName, items, writeCancellation.Token);
+            _playlistSaveTask = saveTask;
+            await saveTask;
+            if (_isClosing)
+            {
+                return;
+            }
             ShowNotice($"Playlist saved · {Path.GetFileName(dialog.FileName)}");
             StatusText.Text = "Playlist saved";
         }
-        catch
+        catch (OperationCanceledException)
         {
-            ShowNotice("The playlist could not be saved");
-            StatusText.Text = "Playlist save failed";
+            if (!_isClosing)
+            {
+                ShowNotice("Playlist saving timed out");
+                StatusText.Text = "Playlist save timed out";
+            }
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+            if (!_isClosing)
+            {
+                ShowNotice("The playlist could not be saved");
+                StatusText.Text = "Playlist save failed";
+            }
         }
         finally
         {
-            SavePlaylistButton.IsEnabled = true;
+            _playlistSaveTask = null;
+            if (!_isClosing)
+            {
+                SavePlaylistButton.IsEnabled = true;
+            }
+        }
+    }
+
+    private static async Task WritePlaylistAsync(
+        string destinationPath,
+        IReadOnlyList<PlaylistItem> items,
+        CancellationToken cancellationToken)
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(destinationPath))!;
+        var temporaryPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(destinationPath)}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp");
+
+        try
+        {
+            await using (var stream = new FileStream(
+                             temporaryPath,
+                             FileMode.CreateNew,
+                             FileAccess.Write,
+                             FileShare.None,
+                             bufferSize: 4096,
+                             FileOptions.Asynchronous | FileOptions.SequentialScan))
+            await using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+            {
+                await writer.WriteLineAsync("#EXTM3U".AsMemory(), cancellationToken);
+                foreach (var item in items)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var duration = item.DurationMilliseconds > 0 ? item.DurationMilliseconds / 1000 : -1;
+                    await writer.WriteLineAsync($"#EXTINF:{duration},{item.Title}".AsMemory(), cancellationToken);
+                    await writer.WriteLineAsync(item.Source.AsMemory(), cancellationToken);
+                }
+
+                await writer.FlushAsync(cancellationToken);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporaryPath, destinationPath, true);
+            temporaryPath = string.Empty;
+        }
+        finally
+        {
+            if (temporaryPath.Length > 0)
+            {
+                try
+                {
+                    File.Delete(temporaryPath);
+                }
+                catch
+                {
+                    // Best-effort cleanup after a failed or canceled save.
+                }
+            }
         }
     }
 
@@ -1166,6 +1697,10 @@ public partial class MainWindow : Window
 
     private void ResetNowPlaying()
     {
+        _isPlaying = false;
+        PlayPauseButton.Content = "\uE768";
+        EngineStatusText.Text = "STOPPED";
+        EngineStatusDot.Fill = new SolidColorBrush(Color.FromRgb(94, 102, 114));
         NowPlayingTitle.Text = "Nothing queued";
         NowPlayingSource.Text = "Choose a source to begin";
         WindowTitleText.Text = "Ready for a film";
@@ -1655,11 +2190,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        var cancellation = new CancellationTokenSource();
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
         var previousCancellation = _settingsSaveCancellation;
         _settingsSaveCancellation = cancellation;
         previousCancellation?.Cancel();
-        _ = SaveSettingsAfterDelayAsync(cancellation);
+        var saveTask = SaveSettingsAfterDelayAsync(cancellation);
+        _settingsSaveTask = saveTask;
+        _ = saveTask;
     }
 
     private async Task SaveSettingsAfterDelayAsync(CancellationTokenSource cancellation)
@@ -1673,11 +2210,16 @@ public partial class MainWindow : Window
         {
             // A newer settings snapshot or shutdown superseded this save.
         }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+        }
         finally
         {
             if (ReferenceEquals(_settingsSaveCancellation, cancellation))
             {
                 _settingsSaveCancellation = null;
+                _settingsSaveTask = null;
             }
 
             cancellation.Dispose();
@@ -1707,6 +2249,18 @@ public partial class MainWindow : Window
 
     private void AddRecent(string source)
     {
+        if (MediaSourceService.TryNormalizeNetworkLocation(source, out var networkLocation))
+        {
+            var uri = new Uri(networkLocation, UriKind.Absolute);
+            source = new UriBuilder(uri)
+            {
+                UserName = string.Empty,
+                Password = string.Empty,
+                Query = string.Empty,
+                Fragment = string.Empty
+            }.Uri.AbsoluteUri;
+        }
+
         _settings.RecentFiles.RemoveAll(item => string.Equals(item, source, StringComparison.OrdinalIgnoreCase));
         _settings.RecentFiles.Insert(0, source);
         if (_settings.RecentFiles.Count > 20)

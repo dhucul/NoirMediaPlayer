@@ -18,10 +18,36 @@ public static class MediaSourceService
         ".m3u", ".m3u8"
     };
 
+    private static readonly HashSet<string> NetworkSchemes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        Uri.UriSchemeHttp,
+        Uri.UriSchemeHttps,
+        "rtsp",
+        "rtp",
+        "udp"
+    };
+
     public static string OpenFileFilter =>
         "Media files|*.3gp;*.aac;*.ac3;*.aiff;*.asf;*.avi;*.divx;*.dts;*.flac;*.flv;*.m2ts;*.m4a;*.m4v;*.mka;*.mkv;*.mov;*.mp2;*.mp3;*.mp4;*.mpeg;*.mpg;*.mts;*.ogg;*.ogm;*.opus;*.rm;*.rmvb;*.ts;*.vob;*.wav;*.webm;*.wma;*.wmv;*.m3u;*.m3u8|Video files|*.avi;*.divx;*.flv;*.m2ts;*.m4v;*.mkv;*.mov;*.mp4;*.mpeg;*.mpg;*.mts;*.rm;*.rmvb;*.ts;*.vob;*.webm;*.wmv|Audio files|*.aac;*.ac3;*.aiff;*.dts;*.flac;*.m4a;*.mka;*.mp2;*.mp3;*.ogg;*.opus;*.wav;*.wma|Playlists|*.m3u;*.m3u8|All files|*.*";
 
-    public static bool IsSupported(string path) => SupportedExtensions.Contains(Path.GetExtension(path));
+    public static bool IsSupported(string path) =>
+        !string.IsNullOrWhiteSpace(path) && SupportedExtensions.Contains(Path.GetExtension(path));
+
+    public static bool TryNormalizeNetworkLocation(string? location, out string normalizedLocation)
+    {
+        normalizedLocation = string.Empty;
+        if (string.IsNullOrWhiteSpace(location) ||
+            !Uri.TryCreate(location.Trim(), UriKind.Absolute, out var uri) ||
+            uri.IsFile ||
+            !NetworkSchemes.Contains(uri.Scheme) ||
+            string.IsNullOrWhiteSpace(uri.Host))
+        {
+            return false;
+        }
+
+        normalizedLocation = uri.AbsoluteUri;
+        return true;
+    }
 
     public static IEnumerable<string> EnumerateFolder(string folder, CancellationToken cancellationToken = default)
     {
@@ -71,6 +97,12 @@ public static class MediaSourceService
         foreach (var path in paths)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (TryNormalizeNetworkLocation(path, out var networkLocation))
+            {
+                yield return networkLocation;
+                continue;
+            }
+
             if (Directory.Exists(path))
             {
                 foreach (var mediaPath in EnumerateFolder(path, cancellationToken))
@@ -107,15 +139,22 @@ public static class MediaSourceService
         Detail = Path.GetDirectoryName(path) ?? string.Empty
     };
 
-    public static PlaylistItem CreateNetworkItem(string location) => new()
+    public static PlaylistItem CreateNetworkItem(string location)
     {
-        Source = location,
-        Title = Uri.TryCreate(location, UriKind.Absolute, out var uri) && !string.IsNullOrWhiteSpace(uri.Host)
-            ? uri.Host
-            : "Network stream",
-        Detail = location,
-        IsNetwork = true
-    };
+        if (!TryNormalizeNetworkLocation(location, out var normalizedLocation))
+        {
+            throw new ArgumentException("The location is not a supported network media URI.", nameof(location));
+        }
+
+        var uri = new Uri(normalizedLocation, UriKind.Absolute);
+        return new PlaylistItem
+        {
+            Source = normalizedLocation,
+            Title = uri.Host,
+            Detail = normalizedLocation,
+            IsNetwork = true
+        };
+    }
 
     private static IEnumerable<string> ReadM3u(string playlistPath, CancellationToken cancellationToken)
     {
@@ -155,19 +194,51 @@ public static class MediaSourceService
                 continue;
             }
 
-            if (Uri.TryCreate(line, UriKind.Absolute, out var uri) && !uri.IsFile)
+            if (TryNormalizeNetworkLocation(line, out var networkLocation))
             {
-                yield return line;
+                yield return networkLocation;
                 continue;
             }
 
-            var resolved = Path.IsPathRooted(line) ? line : Path.Combine(parent, line);
-            if (File.Exists(resolved) && IsSupported(resolved))
+            if (TryResolvePlaylistFile(parent, line, out var resolved))
             {
-                yield return Path.GetFullPath(resolved);
+                yield return resolved;
             }
         }
     }
+
+    private static bool TryResolvePlaylistFile(string parent, string entry, out string resolvedPath)
+    {
+        resolvedPath = string.Empty;
+        try
+        {
+            // File URIs and UNC paths in a playlist can silently trigger access to local
+            // resources or outbound SMB authentication. Explicit file/folder selection
+            // remains available for locations the user intentionally chose.
+            if (entry.StartsWith("file:", StringComparison.OrdinalIgnoreCase) || IsUncPath(entry))
+            {
+                return false;
+            }
+
+            var candidate = Path.IsPathRooted(entry) ? entry : Path.Combine(parent, entry);
+            var fullPath = Path.GetFullPath(candidate);
+            if (IsUncPath(fullPath) || !File.Exists(fullPath) || !IsSupported(fullPath))
+            {
+                return false;
+            }
+
+            resolvedPath = fullPath;
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsUncPath(string path) =>
+        path.StartsWith(@"\\", StringComparison.Ordinal) ||
+        Uri.TryCreate(path, UriKind.Absolute, out var uri) && uri.IsUnc;
 
     private static string CleanTitle(string value) =>
         value.Replace('.', ' ').Replace('_', ' ').Trim();

@@ -1,11 +1,14 @@
 using System.Windows;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using NoirMediaPlayer.Services;
 
 namespace NoirMediaPlayer;
 
 public partial class OpenLocationWindow : Window
 {
+    private string _mediaLocation = string.Empty;
+
     public OpenLocationWindow()
     {
         InitializeComponent();
@@ -16,17 +19,18 @@ public partial class OpenLocationWindow : Window
         };
     }
 
-    public string MediaLocation => LocationTextBox.Text;
+    public string MediaLocation => _mediaLocation;
 
     private void Open_Click(object sender, RoutedEventArgs e)
     {
-        if (!Uri.TryCreate(LocationTextBox.Text.Trim(), UriKind.Absolute, out _))
+        if (!MediaSourceService.TryNormalizeNetworkLocation(LocationTextBox.Text, out var normalizedLocation))
         {
             LocationTextBox.SelectAll();
             LocationTextBox.Focus();
             return;
         }
 
+        _mediaLocation = normalizedLocation;
         DialogResult = true;
     }
 

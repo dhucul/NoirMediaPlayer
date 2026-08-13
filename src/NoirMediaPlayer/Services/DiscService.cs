@@ -26,11 +26,11 @@ public static class DiscService
                 var root = drive.RootDirectory.FullName;
                 if (Directory.Exists(Path.Combine(root, "BDMV")))
                 {
-                    result.Add(new DiscInfo(root, drive.VolumeLabel, $"bluray:///{root.Replace('\\', '/')}", "BLU-RAY"));
+                    result.Add(new DiscInfo(root, drive.VolumeLabel, CreateDiscSource("bluray", root), "BLU-RAY"));
                 }
-                else
+                else if (Directory.Exists(Path.Combine(root, "VIDEO_TS")))
                 {
-                    result.Add(new DiscInfo(root, drive.VolumeLabel, $"dvd:///{root.Replace('\\', '/')}", "DVD"));
+                    result.Add(new DiscInfo(root, drive.VolumeLabel, CreateDiscSource("dvd", root), "DVD"));
                 }
             }
             catch
@@ -52,11 +52,12 @@ public static class DiscService
 
     public static PlaylistItem? CreateFromFolder(string folder)
     {
-        if (Directory.Exists(Path.Combine(folder, "VIDEO_TS")))
+        if (Directory.Exists(Path.Combine(folder, "VIDEO_TS")) &&
+            !Directory.Exists(Path.Combine(folder, "BDMV")))
         {
             return new PlaylistItem
             {
-                Source = $"dvd:///{folder.Replace('\\', '/')}",
+                Source = CreateDiscSource("dvd", folder),
                 Title = new DirectoryInfo(folder).Name,
                 Detail = "DVD folder",
                 IsDisc = true
@@ -67,7 +68,7 @@ public static class DiscService
         {
             return new PlaylistItem
             {
-                Source = $"bluray:///{folder.Replace('\\', '/')}",
+                Source = CreateDiscSource("bluray", folder),
                 Title = new DirectoryInfo(folder).Name,
                 Detail = "Blu-ray folder",
                 IsDisc = true
@@ -75,5 +76,12 @@ public static class DiscService
         }
 
         return null;
+    }
+
+    private static string CreateDiscSource(string scheme, string folder)
+    {
+        var path = Path.GetFullPath(folder);
+        var fileUri = new Uri(path.EndsWith(Path.DirectorySeparatorChar) ? path : path + Path.DirectorySeparatorChar);
+        return $"{scheme}:///{fileUri.AbsolutePath.TrimStart('/')}";
     }
 }

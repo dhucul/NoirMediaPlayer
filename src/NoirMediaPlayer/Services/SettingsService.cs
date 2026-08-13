@@ -6,6 +6,9 @@ namespace NoirMediaPlayer.Services;
 
 public sealed class SettingsService
 {
+    private const long MaxSettingsFileBytes = 1_048_576;
+    private const int MaxResumePositions = 250;
+
     private readonly SemaphoreSlim _saveGate = new(1, 1);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -14,10 +17,15 @@ public sealed class SettingsService
         PropertyNameCaseInsensitive = true
     };
 
-    private readonly string _settingsPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "NoirMediaPlayer",
-        "settings.json");
+    private readonly string _settingsPath;
+
+    public SettingsService(string? settingsPath = null)
+    {
+        _settingsPath = settingsPath ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "NoirMediaPlayer",
+            "settings.json");
+    }
 
     public PlayerSettings Load()
     {
@@ -28,36 +36,25 @@ public sealed class SettingsService
                 return new PlayerSettings();
             }
 
-            var settings = JsonSerializer.Deserialize<PlayerSettings>(File.ReadAllText(_settingsPath), JsonOptions)
-                           ?? new PlayerSettings();
+            var fileInfo = new FileInfo(_settingsPath);
+            if (fileInfo.Length is <= 0 or > MaxSettingsFileBytes)
+            {
+                return new PlayerSettings();
+            }
+
+            using var stream = new FileStream(
+                _settingsPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 4096,
+                FileOptions.SequentialScan);
+            var settings = JsonSerializer.Deserialize<PlayerSettings>(stream, JsonOptions) ?? new PlayerSettings();
             return Normalize(settings);
         }
         catch
         {
             return new PlayerSettings();
-        }
-    }
-
-    public void Save(PlayerSettings settings)
-    {
-        var entered = false;
-        try
-        {
-            var content = JsonSerializer.Serialize(settings, JsonOptions);
-            _saveGate.Wait();
-            entered = true;
-            Write(content);
-        }
-        catch
-        {
-            // Settings persistence should never interrupt playback or shutdown.
-        }
-        finally
-        {
-            if (entered)
-            {
-                _saveGate.Release();
-            }
         }
     }
 
@@ -75,14 +72,16 @@ public sealed class SettingsService
         }
 
         await _saveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        string? temporaryPath = null;
         try
         {
             var directory = Path.GetDirectoryName(_settingsPath)!;
             Directory.CreateDirectory(directory);
-            var temporaryPath = _settingsPath + ".tmp";
+            temporaryPath = $"{_settingsPath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
             await File.WriteAllTextAsync(temporaryPath, content, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             File.Move(temporaryPath, _settingsPath, true);
+            temporaryPath = null;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -94,17 +93,20 @@ public sealed class SettingsService
         }
         finally
         {
+            if (temporaryPath is not null)
+            {
+                try
+                {
+                    File.Delete(temporaryPath);
+                }
+                catch
+                {
+                    // A later cleanup pass or the OS can remove an abandoned temp file.
+                }
+            }
+
             _saveGate.Release();
         }
-    }
-
-    private void Write(string content)
-    {
-        var directory = Path.GetDirectoryName(_settingsPath)!;
-        Directory.CreateDirectory(directory);
-        var temporaryPath = _settingsPath + ".tmp";
-        File.WriteAllText(temporaryPath, content);
-        File.Move(temporaryPath, _settingsPath, true);
     }
 
     private static PlayerSettings Normalize(PlayerSettings settings)
@@ -125,12 +127,11 @@ public sealed class SettingsService
             .ToList();
 
         var resumePositions = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        foreach (var entry in settings.ResumePositions ?? [])
+        foreach (var entry in (settings.ResumePositions ?? [])
+                     .Where(entry => !string.IsNullOrWhiteSpace(entry.Key) && entry.Value > 0)
+                     .TakeLast(MaxResumePositions))
         {
-            if (!string.IsNullOrWhiteSpace(entry.Key) && entry.Value > 0)
-            {
-                resumePositions[entry.Key] = entry.Value;
-            }
+            resumePositions[entry.Key] = entry.Value;
         }
 
         settings.ResumePositions = resumePositions;
