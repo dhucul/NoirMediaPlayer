@@ -1,0 +1,32 @@
+<Window x:Class="NoirMediaPlayer.OpenLocationWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Open network stream" Width="520" Height="235"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        WindowStyle="None" Background="{StaticResource InkBrush}"
+        ShowInTaskbar="False" PreviewKeyDown="Window_PreviewKeyDown">
+    <Border BorderBrush="#FF353B46" BorderThickness="1" CornerRadius="11" Background="#FF0D1015" Padding="22">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <Grid MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+                <StackPanel>
+                    <TextBlock Text="OPEN NETWORK STREAM" FontFamily="{StaticResource DisplayFont}" FontSize="15" FontWeight="Bold" />
+                    <TextBlock Text="HTTP, HTTPS, RTSP, RTP, UDP, or a direct media URL" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,4,0,0" />
+                </StackPanel>
+                <Button Style="{StaticResource IconButton}" Content="&#xE8BB;" Width="30" Height="30" HorizontalAlignment="Right" Click="Cancel_Click" />
+            </Grid>
+            <TextBlock Grid.Row="1" Text="Media location" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,18,0,5" />
+            <TextBox x:Name="LocationTextBox" Grid.Row="2" Height="38" VerticalContentAlignment="Center"
+                     Text="https://" />
+            <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,17,0,0">
+                <Button Style="{StaticResource NoirButton}" Content="Cancel" Width="84" Margin="0,0,8,0" Click="Cancel_Click" />
+                <Button Style="{StaticResource AccentButton}" Content="Open stream" Width="112" Click="Open_Click" />
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>
