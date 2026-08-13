@@ -381,7 +381,7 @@ public partial class MainWindow : Window
         }
 
         _shutdownComplete = true;
-        Close();
+        _ = Dispatcher.BeginInvoke(Close, DispatcherPriority.ApplicationIdle);
     }
 
     private void DisposePlaybackResources()
