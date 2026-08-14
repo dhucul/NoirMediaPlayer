@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text.Json;
 using NoirMediaPlayer.Models;
 using NoirMediaPlayer.Services;
@@ -117,6 +118,65 @@ public sealed class ServiceRegressionTests
         Assert.False(AacsService.LibraryChangeRequiresRestart(activePath, currentStatus));
         Assert.True(AacsService.LibraryChangeRequiresRestart(selectedPath, currentStatus));
         Assert.False(AacsService.LibraryChangeRequiresRestart(string.Empty, currentStatus));
+    }
+
+    [Fact]
+    public async Task AacsKeyDatabaseInstall_ExtractsDownloadedZipInsteadOfInstallingItAsCfg()
+    {
+        using var temp = new TempDirectory();
+        var downloadPath = Path.Combine(temp.Path, "keydb-download");
+        var destinationPath = Path.Combine(temp.Path, "KEYDB.cfg");
+
+        using (var archive = ZipFile.Open(downloadPath, ZipArchiveMode.Create))
+        {
+            var entry = archive.CreateEntry("keydb.cfg", CompressionLevel.SmallestSize);
+            await using var stream = entry.Open();
+            await using var writer = new StreamWriter(stream);
+            await writer.WriteAsync("; KEYDB test data\n| DK | DEVICE_KEY 0x0011223344556677 | DEVICE_NODE 0x0011 |\n");
+        }
+
+        var result = await AacsService.InstallDownloadedKeyDatabaseAsync(downloadPath, destinationPath);
+
+        Assert.True(result.Success, result.Message);
+        Assert.True(AacsService.IsValidKeyDatabaseContent(destinationPath));
+        Assert.Equal((byte)';', File.ReadAllBytes(destinationPath)[0]);
+    }
+
+    [Fact]
+    public async Task AacsKeyDatabaseInstall_RejectsArchiveWithoutKeyDatabaseAndPreservesExistingFile()
+    {
+        using var temp = new TempDirectory();
+        var downloadPath = Path.Combine(temp.Path, "keydb-download");
+        var destinationPath = Path.Combine(temp.Path, "KEYDB.cfg");
+        const string existingKeyDatabase = "0x00112233445566778899AABBCCDDEEFF = Test disc | V | 0x0011 |\n";
+        await File.WriteAllTextAsync(destinationPath, existingKeyDatabase);
+
+        using (var archive = ZipFile.Open(downloadPath, ZipArchiveMode.Create))
+        {
+            var entry = archive.CreateEntry("error.html");
+            await using var stream = entry.Open();
+            await using var writer = new StreamWriter(stream);
+            await writer.WriteAsync("<html>server error</html>");
+        }
+
+        var result = await AacsService.InstallDownloadedKeyDatabaseAsync(downloadPath, destinationPath);
+
+        Assert.False(result.Success);
+        Assert.Equal(existingKeyDatabase, await File.ReadAllTextAsync(destinationPath));
+    }
+
+    [Theory]
+    [InlineData("<html>server error</html>", false)]
+    [InlineData("; comments only\n# still comments\n", false)]
+    [InlineData("; comment\n| DK | DEVICE_KEY 0x0011223344556677 | DEVICE_NODE 0x0011 |", true)]
+    [InlineData("0x00112233445566778899AABBCCDDEEFF = Test disc | V | 0x0011 |", true)]
+    public void AacsKeyDatabaseValidation_RequiresPlaintextKeyDatabaseSyntax(string content, bool expected)
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "KEYDB.cfg");
+        File.WriteAllText(path, content);
+
+        Assert.Equal(expected, AacsService.IsValidKeyDatabaseContent(path));
     }
 
     [Fact]

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.IO;
+using System.IO.Compression;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -32,8 +33,18 @@ public sealed record AacsKeyDownloadResult(
 public static class AacsService
 {
     private const string LibraryFileName = "libaacs.dll";
+    private const long MaximumDownloadBytes = 128 * 1024 * 1024;
+    private const long MaximumKeyDatabaseBytes = 256 * 1024 * 1024;
     private const uint LoadLibrarySearchDllLoadDir = 0x00000100;
     private const uint LoadLibrarySearchDefaultDirs = 0x00001000;
+
+    private enum KeyDatabaseState
+    {
+        Missing,
+        Invalid,
+        Compressed,
+        Ready
+    }
 
     private static readonly object SyncRoot = new();
     private static IntPtr _libraryHandle;
@@ -199,31 +210,130 @@ public static class AacsService
 
         _libraryHandle = handle;
         Environment.SetEnvironmentVariable("LIBAACS_PATH", path, EnvironmentVariableTarget.Process);
+        Environment.SetEnvironmentVariable("AACS_CONFIG_DIR", KeyDatabaseDirectory, EnvironmentVariableTarget.Process);
         return CreateReadyStatus(path);
     }
 
     private static AacsRuntimeStatus CreateReadyStatus(string path)
     {
-        var keyDatabaseFound = HasKeyDatabase();
+        var keyDatabaseState = InspectKeyDatabase(KeyDatabasePath);
+        var keyDatabaseFound = keyDatabaseState == KeyDatabaseState.Ready;
         return new AacsRuntimeStatus(
             AacsRuntimeState.Ready,
-            keyDatabaseFound
-                ? "AACS runtime ready · KEYDB.cfg found (disc key not yet verified)"
-                : "AACS runtime ready · playback credentials not configured",
+            keyDatabaseState switch
+            {
+                KeyDatabaseState.Ready => "AACS runtime ready · KEYDB.cfg valid (disc key not yet verified)",
+                KeyDatabaseState.Compressed => "AACS runtime ready · KEYDB.cfg is still a ZIP archive; download it again to extract it",
+                KeyDatabaseState.Invalid => "AACS runtime ready · KEYDB.cfg is not a valid key database",
+                _ => "AACS runtime ready · playback credentials not configured"
+            },
             path,
             keyDatabaseFound);
     }
 
-    private static bool HasKeyDatabase()
+    private static KeyDatabaseState InspectKeyDatabase(string path)
     {
         try
         {
-            return File.Exists(KeyDatabasePath) && new FileInfo(KeyDatabasePath).Length > 0;
+            if (!File.Exists(path) || new FileInfo(path).Length == 0)
+            {
+                return KeyDatabaseState.Missing;
+            }
+
+            if (IsZipArchive(path))
+            {
+                return KeyDatabaseState.Compressed;
+            }
+
+            return IsValidKeyDatabaseContent(path)
+                ? KeyDatabaseState.Ready
+                : KeyDatabaseState.Invalid;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return KeyDatabaseState.Invalid;
+        }
+    }
+
+    internal static bool IsValidKeyDatabaseContent(string path)
+    {
+        try
+        {
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 4096);
+            using var reader = new StreamReader(stream);
+
+            // KEYDB files can begin with blank lines and ';' or '#' comments. Look for
+            // a config record (| ... |) or a disc-key assignment instead of trusting
+            // only the filename or the first byte.
+            for (var lineNumber = 0; lineNumber < 10_000 && !reader.EndOfStream; lineNumber++)
+            {
+                var line = reader.ReadLine();
+                if (line is null)
+                {
+                    break;
+                }
+
+                var trimmed = line.TrimStart();
+                if (trimmed.Length == 0 || trimmed[0] is ';' or '#')
+                {
+                    continue;
+                }
+
+                if (trimmed.StartsWith("<!", StringComparison.Ordinal) ||
+                    trimmed.StartsWith("<html", StringComparison.OrdinalIgnoreCase) ||
+                    trimmed.StartsWith("<?xml", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                if (trimmed[0] == '|' && trimmed.Count(character => character == '|') >= 3)
+                {
+                    return true;
+                }
+
+                var separatorIndex = trimmed.IndexOf('=');
+                if (separatorIndex > 0)
+                {
+                    var identifier = trimmed[..separatorIndex].Trim();
+                    if (identifier.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                    {
+                        identifier = identifier[2..];
+                    }
+
+                    if (identifier.Length >= 16 && identifier.All(Uri.IsHexDigit))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            return false;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return false;
         }
+    }
+
+    private static bool IsZipArchive(string path)
+    {
+        Span<byte> signature = stackalloc byte[4];
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (stream.Read(signature) != signature.Length)
+        {
+            return false;
+        }
+
+        return signature[0] == (byte)'P' &&
+               signature[1] == (byte)'K' &&
+               (signature[2], signature[3]) is ((3, 4) or (5, 6) or (7, 8));
     }
 
     public static async Task<AacsKeyDownloadResult> DownloadKeyDatabaseAsync(
@@ -271,7 +381,11 @@ public static class AacsService
                     bufferSize: 8192,
                     FileOptions.Asynchronous | FileOptions.SequentialScan);
 
-                await sourceStream.CopyToAsync(destinationStream, cancellationToken).ConfigureAwait(false);
+                await CopyToAsync(
+                    sourceStream,
+                    destinationStream,
+                    MaximumDownloadBytes,
+                    cancellationToken).ConfigureAwait(false);
                 await destinationStream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
             catch
@@ -290,23 +404,10 @@ public static class AacsService
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (new FileInfo(temporaryPath).Length == 0)
-            {
-                File.Delete(temporaryPath);
-                return new AacsKeyDownloadResult(
-                    false,
-                    "The downloaded key database is empty. The server may be unavailable.");
-            }
-
-            if (File.Exists(KeyDatabasePath))
-            {
-                var backupPath = KeyDatabasePath + ".backup";
-                File.Move(KeyDatabasePath, backupPath, true);
-            }
-
-            File.Move(temporaryPath, KeyDatabasePath);
-
-            return new AacsKeyDownloadResult(true, "AACS key database installed successfully.");
+            return await InstallDownloadedKeyDatabaseAsync(
+                temporaryPath,
+                KeyDatabasePath,
+                cancellationToken).ConfigureAwait(false);
         }
         catch (HttpRequestException exception)
         {
@@ -329,6 +430,158 @@ public static class AacsService
             return new AacsKeyDownloadResult(
                 false,
                 $"Key database download failed: {exception.Message}");
+        }
+    }
+
+    internal static async Task<AacsKeyDownloadResult> InstallDownloadedKeyDatabaseAsync(
+        string downloadedPath,
+        string destinationPath,
+        CancellationToken cancellationToken = default)
+    {
+        string? extractedPath = null;
+        var installed = false;
+        try
+        {
+            if (!File.Exists(downloadedPath) || new FileInfo(downloadedPath).Length == 0)
+            {
+                return new AacsKeyDownloadResult(
+                    false,
+                    "The downloaded key database is empty. The server may be unavailable.");
+            }
+
+            var installationCandidate = downloadedPath;
+            var wasCompressed = IsZipArchive(downloadedPath);
+            if (wasCompressed)
+            {
+                extractedPath = Path.Combine(
+                    Path.GetDirectoryName(destinationPath) ?? Path.GetTempPath(),
+                    $".KEYDB.cfg.{Environment.ProcessId}.{Guid.NewGuid():N}.extracting");
+
+                using var archive = ZipFile.OpenRead(downloadedPath);
+                var matchingEntries = archive.Entries
+                    .Where(entry =>
+                        entry.Length > 0 &&
+                        Path.GetFileName(entry.FullName).Equals("KEYDB.cfg", StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                if (matchingEntries.Length != 1)
+                {
+                    return new AacsKeyDownloadResult(
+                        false,
+                        "The downloaded archive does not contain exactly one KEYDB.cfg file.");
+                }
+
+                var keyDatabaseEntry = matchingEntries[0];
+                if (keyDatabaseEntry.Length > MaximumKeyDatabaseBytes)
+                {
+                    return new AacsKeyDownloadResult(false, "The key database archive is unexpectedly large.");
+                }
+
+                await using (var source = keyDatabaseEntry.Open())
+                await using (var destination = new FileStream(
+                    extractedPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 8192,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan))
+                {
+                    await CopyToAsync(
+                        source,
+                        destination,
+                        MaximumKeyDatabaseBytes,
+                        cancellationToken).ConfigureAwait(false);
+                    await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                installationCandidate = extractedPath;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsValidKeyDatabaseContent(installationCandidate))
+            {
+                return new AacsKeyDownloadResult(
+                    false,
+                    "The downloaded file does not appear to be a valid KEYDB.cfg. The server may have returned an error page.");
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? Path.GetTempPath());
+            var backupPath = destinationPath + ".backup";
+            if (File.Exists(destinationPath))
+            {
+                File.Move(destinationPath, backupPath, true);
+            }
+
+            try
+            {
+                File.Move(installationCandidate, destinationPath);
+                installed = true;
+            }
+            catch
+            {
+                if (File.Exists(backupPath) && !File.Exists(destinationPath))
+                {
+                    File.Move(backupPath, destinationPath);
+                }
+
+                throw;
+            }
+
+            return new AacsKeyDownloadResult(
+                true,
+                wasCompressed
+                    ? "AACS key database downloaded and extracted successfully."
+                    : "AACS key database installed successfully.");
+        }
+        finally
+        {
+            if (!installed || !string.Equals(downloadedPath, destinationPath, StringComparison.OrdinalIgnoreCase))
+            {
+                TryDeleteFile(downloadedPath);
+            }
+
+            if (extractedPath is not null &&
+                (!installed || !string.Equals(extractedPath, destinationPath, StringComparison.OrdinalIgnoreCase)))
+            {
+                TryDeleteFile(extractedPath);
+            }
+        }
+    }
+
+    private static async Task CopyToAsync(
+        Stream source,
+        Stream destination,
+        long maximumBytes,
+        CancellationToken cancellationToken)
+    {
+        var buffer = new byte[81920];
+        long totalBytes = 0;
+        while (true)
+        {
+            var bytesRead = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (bytesRead == 0)
+            {
+                return;
+            }
+
+            totalBytes += bytesRead;
+            if (totalBytes > maximumBytes)
+            {
+                throw new InvalidDataException("The downloaded key database is unexpectedly large.");
+            }
+
+            await destination.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch
+        {
+            // Best-effort cleanup of a temporary download or extraction.
         }
     }
 

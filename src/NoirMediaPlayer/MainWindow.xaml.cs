@@ -901,12 +901,12 @@ public partial class MainWindow : Window
                 item.IsPlaying = false;
                 EngineStatusText.Text = "AACS KEY REQUIRED";
                 EngineStatusDot.Fill = Brushes.OrangeRed;
-                StatusText.Text = "Protected Blu-ray playback credentials are not configured";
+                StatusText.Text = aacsStatus.Message;
                 StatusDot.Fill = Brushes.OrangeRed;
-                ShowNotice("Protected Blu-ray · KEYDB.cfg is required");
+                ShowNotice("Protected Blu-ray · a valid plaintext KEYDB.cfg is required");
                 MessageBox.Show(
                     this,
-                    $"NOIR cannot unlock this protected Blu-ray on its own. The AACS runtime is installed, but no playback credentials are configured.\n\nUse licensed Blu-ray playback software, or place a lawfully obtained KEYDB.cfg in:\n{AacsService.KeyDatabasePath}\n\nUse Quick Settings → Blu-ray AACS → Open key folder.",
+                    $"NOIR cannot unlock this protected Blu-ray.\n\n{aacsStatus.Message}\n\nUse Download AACS keys to install and extract the current database, or place a lawfully obtained plaintext KEYDB.cfg in:\n{AacsService.KeyDatabasePath}\n\nUse Quick Settings → Blu-ray AACS → Open key folder.",
                     "Protected Blu-ray credentials required",
                     MessageBoxButton.OK,
                     MessageBoxImage.Warning);
@@ -2412,11 +2412,11 @@ public partial class MainWindow : Window
 
             if (result.Success)
             {
-                ShowNotice("AACS key database installed · Ready for protected Blu-ray playback");
+                ShowNotice("AACS key database installed · Ready to try protected Blu-rays");
                 StatusText.Text = "AACS key database installed";
                 MessageBox.Show(
                     this,
-                    $"The AACS key database has been installed successfully.\n\nLocation: {AacsService.KeyDatabasePath}\n\nYou can now play protected Blu-ray discs.",
+                    $"The AACS key database has been installed as plaintext successfully.\n\nLocation: {AacsService.KeyDatabasePath}\n\nNOIR can now try protected Blu-ray discs. A disc will still fail if this database has no matching key, or if it uses unsupported protection such as BD+ or UHD AACS 2.x.",
                     "AACS keys installed",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
