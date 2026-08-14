@@ -1,6 +1,9 @@
 using System.ComponentModel;
 using System.IO;
+using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace NoirMediaPlayer.Services;
 
@@ -21,6 +24,10 @@ public sealed record AacsRuntimeStatus(
 {
     public bool IsReady => State == AacsRuntimeState.Ready;
 }
+
+public sealed record AacsKeyDownloadResult(
+    bool Success,
+    string Message);
 
 public static class AacsService
 {
@@ -216,6 +223,112 @@ public static class AacsService
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return false;
+        }
+    }
+
+    public static async Task<AacsKeyDownloadResult> DownloadKeyDatabaseAsync(
+        CancellationToken cancellationToken = default)
+    {
+        const string keyDatabaseUrl = "http://fvonline-db.bplaced.net/fv_download.php?lang=eng";
+        const string userAgent = "NoirMediaPlayer/1.0";
+
+        try
+        {
+            Directory.CreateDirectory(KeyDatabaseDirectory);
+
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
+            client.Timeout = TimeSpan.FromSeconds(60);
+
+            using var response = await client.GetAsync(
+                keyDatabaseUrl,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken).ConfigureAwait(false);
+
+            response.EnsureSuccessStatusCode();
+
+            var contentLength = response.Content.Headers.ContentLength;
+            if (contentLength.HasValue && contentLength.Value == 0)
+            {
+                return new AacsKeyDownloadResult(
+                    false,
+                    "The key database server returned an empty response. Try again later.");
+            }
+
+            var temporaryPath = Path.Combine(
+                KeyDatabaseDirectory,
+                $".KEYDB.cfg.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp");
+
+            try
+            {
+                await using var sourceStream = await response.Content.ReadAsStreamAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                await using var destinationStream = new FileStream(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 8192,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+                await sourceStream.CopyToAsync(destinationStream, cancellationToken).ConfigureAwait(false);
+                await destinationStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                try
+                {
+                    File.Delete(temporaryPath);
+                }
+                catch
+                {
+                    // Best-effort cleanup.
+                }
+
+                throw;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (new FileInfo(temporaryPath).Length == 0)
+            {
+                File.Delete(temporaryPath);
+                return new AacsKeyDownloadResult(
+                    false,
+                    "The downloaded key database is empty. The server may be unavailable.");
+            }
+
+            if (File.Exists(KeyDatabasePath))
+            {
+                var backupPath = KeyDatabasePath + ".backup";
+                File.Move(KeyDatabasePath, backupPath, true);
+            }
+
+            File.Move(temporaryPath, KeyDatabasePath);
+
+            return new AacsKeyDownloadResult(true, "AACS key database installed successfully.");
+        }
+        catch (HttpRequestException exception)
+        {
+            return new AacsKeyDownloadResult(
+                false,
+                $"Could not reach the key database server: {exception.Message}");
+        }
+        catch (TaskCanceledException)
+        {
+            return new AacsKeyDownloadResult(
+                false,
+                "Key database download timed out. Check your internet connection.");
+        }
+        catch (OperationCanceledException)
+        {
+            return new AacsKeyDownloadResult(false, "Key database download was cancelled.");
+        }
+        catch (Exception exception)
+        {
+            return new AacsKeyDownloadResult(
+                false,
+                $"Key database download failed: {exception.Message}");
         }
     }
 

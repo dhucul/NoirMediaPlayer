@@ -2387,6 +2387,71 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void DownloadKeys_Click(object sender, RoutedEventArgs e)
+    {
+        if (DownloadKeysButton is null)
+        {
+            return;
+        }
+
+        DownloadKeysButton.IsEnabled = false;
+        StatusText.Text = "Downloading AACS key database…";
+        ShowNotice("Connecting to key database server…");
+
+        try
+        {
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+            cancellation.CancelAfter(TimeSpan.FromSeconds(90));
+
+            var result = await AacsService.DownloadKeyDatabaseAsync(cancellation.Token);
+
+            if (_isClosing)
+            {
+                return;
+            }
+
+            if (result.Success)
+            {
+                ShowNotice("AACS key database installed · Ready for protected Blu-ray playback");
+                StatusText.Text = "AACS key database installed";
+                MessageBox.Show(
+                    this,
+                    $"The AACS key database has been installed successfully.\n\nLocation: {AacsService.KeyDatabasePath}\n\nYou can now play protected Blu-ray discs.",
+                    "AACS keys installed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+            else
+            {
+                ShowNotice(result.Message);
+                StatusText.Text = "AACS key download failed";
+                MessageBox.Show(
+                    this,
+                    $"Could not download the AACS key database.\n\n{result.Message}\n\nYou can manually place a KEYDB.cfg file in:\n{AacsService.KeyDatabaseDirectory}",
+                    "AACS key download failed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+            if (!_isClosing)
+            {
+                ShowNotice("AACS key download failed unexpectedly");
+                StatusText.Text = "AACS key download failed";
+            }
+        }
+        finally
+        {
+            if (!_isClosing)
+            {
+                DownloadKeysButton.IsEnabled = true;
+                UpdateAacsStatus();
+            }
+        }
+    }
+
     private void UpdateAacsStatus()
     {
         if (AacsStatusText is null)
