@@ -89,6 +89,38 @@ public sealed class ServiceRegressionTests
     }
 
     [Fact]
+    public void DiscEjectTarget_PrefersCurrentDiscDriveAndRejectsAmbiguousFallback()
+    {
+        var opticalDrives = new[] { @"H:\", @"D:\" };
+
+        var currentDrive = DiscService.SelectEjectTarget(
+            opticalDrives,
+            "bluray:///H:/",
+            "dvd:///D:/");
+        var ambiguousDrive = DiscService.SelectEjectTarget(
+            opticalDrives,
+            "bluray:///C:/disc-folder/");
+        var soleDrive = DiscService.SelectEjectTarget(
+            [@"D:\"],
+            "bluray:///C:/disc-folder/");
+
+        Assert.Equal(@"H:\", currentDrive, ignoreCase: true);
+        Assert.Null(ambiguousDrive);
+        Assert.Equal(@"D:\", soleDrive, ignoreCase: true);
+        Assert.True(DiscService.IsDiscSourceOnDrive("dvd:///D:/", @"D:\"));
+        Assert.False(DiscService.IsDiscSourceOnDrive("bluray:///C:/disc-folder/", @"D:\"));
+    }
+
+    [Theory]
+    [InlineData("https://example.com/disc")]
+    [InlineData("bluray://server/share")]
+    [InlineData("not-a-disc-source")]
+    public void DiscEjectTarget_RejectsNonLocalDiscSources(string source)
+    {
+        Assert.False(DiscService.TryGetDiscRoot(source, out _));
+    }
+
+    [Fact]
     public void AacsLibraryPath_RequiresTheExpectedDllNameAndNormalizesIt()
     {
         using var temp = new TempDirectory();
@@ -165,6 +197,54 @@ public sealed class ServiceRegressionTests
         Assert.Equal(existingKeyDatabase, await File.ReadAllTextAsync(destinationPath));
     }
 
+    [Fact]
+    public async Task AacsKeyDatabaseStartupRepair_ExtractsArchiveInPlaceAndKeepsBackup()
+    {
+        using var temp = new TempDirectory();
+        var keyDatabasePath = Path.Combine(temp.Path, "KEYDB.cfg");
+
+        using (var archive = ZipFile.Open(keyDatabasePath, ZipArchiveMode.Create))
+        {
+            var entry = archive.CreateEntry("keydb.cfg", CompressionLevel.SmallestSize);
+            await using var stream = entry.Open();
+            await using var writer = new StreamWriter(stream);
+            await writer.WriteAsync("; KEYDB test data\n| DK | DEVICE_KEY 0x0011223344556677 | DEVICE_NODE 0x0011 |\n");
+        }
+
+        var result = await AacsService.RepairCompressedKeyDatabaseIfNeededAsync(keyDatabasePath);
+
+        Assert.NotNull(result);
+        Assert.True(result.Success, result.Message);
+        Assert.True(AacsService.IsValidKeyDatabaseContent(keyDatabasePath));
+        Assert.True(File.Exists(keyDatabasePath + ".backup"));
+        Assert.Equal((byte)'P', File.ReadAllBytes(keyDatabasePath + ".backup")[0]);
+    }
+
+    [Fact]
+    public async Task AacsKeyDatabaseStartupRepair_PreservesUnusableArchive()
+    {
+        using var temp = new TempDirectory();
+        var keyDatabasePath = Path.Combine(temp.Path, "KEYDB.cfg");
+
+        using (var archive = ZipFile.Open(keyDatabasePath, ZipArchiveMode.Create))
+        {
+            var entry = archive.CreateEntry("error.html");
+            await using var stream = entry.Open();
+            await using var writer = new StreamWriter(stream);
+            await writer.WriteAsync("<html>server error</html>");
+        }
+
+        var originalLength = new FileInfo(keyDatabasePath).Length;
+        var result = await AacsService.RepairCompressedKeyDatabaseIfNeededAsync(keyDatabasePath);
+
+        Assert.NotNull(result);
+        Assert.False(result.Success);
+        Assert.True(File.Exists(keyDatabasePath));
+        Assert.Equal(originalLength, new FileInfo(keyDatabasePath).Length);
+        using var preservedArchive = ZipFile.OpenRead(keyDatabasePath);
+        Assert.Single(preservedArchive.Entries);
+    }
+
     [Theory]
     [InlineData("<html>server error</html>", false)]
     [InlineData("; comments only\n# still comments\n", false)]
@@ -177,6 +257,37 @@ public sealed class ServiceRegressionTests
         File.WriteAllText(path, content);
 
         Assert.Equal(expected, AacsService.IsValidKeyDatabaseContent(path));
+    }
+
+    [Fact]
+    public void AacsKeyDatabaseValidation_RejectsAnOversizedLine()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "KEYDB.cfg");
+        File.WriteAllText(path, new string('A', 32 * 1024) + " = value");
+
+        Assert.False(AacsService.IsValidKeyDatabaseContent(path));
+    }
+
+    [Fact]
+    public async Task AacsKeyDatabaseInstall_AcceptsExistingPlaintextInPlace()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "KEYDB.cfg");
+        const string content = "0x00112233445566778899AABBCCDDEEFF = Test disc | V | 0x0011 |\n";
+        await File.WriteAllTextAsync(path, content);
+
+        var result = await AacsService.InstallDownloadedKeyDatabaseAsync(path, path);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Equal(content, await File.ReadAllTextAsync(path));
+        Assert.False(File.Exists(path + ".backup"));
+    }
+
+    [Fact]
+    public void AacsKeyDatabaseDownload_UsesAuthenticatedTransport()
+    {
+        Assert.Equal(Uri.UriSchemeHttps, AacsService.KeyDatabaseDownloadUri.Scheme);
     }
 
     [Fact]

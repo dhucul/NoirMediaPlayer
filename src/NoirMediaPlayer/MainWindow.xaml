@@ -134,6 +134,15 @@
                                     <TextBlock Text="Play DVD / disc" VerticalAlignment="Center" />
                                 </StackPanel>
                             </Button>
+                            <Button x:Name="EjectDiscButton" Style="{StaticResource SidebarButton}" Click="EjectDisc_Click"
+                                    ToolTip="Eject the active optical disc (Ctrl+E)">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="⏏" FontFamily="Segoe UI Symbol" FontSize="15" Width="28" />
+                                    <TextBlock Text="Eject disc" VerticalAlignment="Center" />
+                                    <TextBlock Text="CTRL E" Foreground="{StaticResource MutedTextBrush}" FontSize="9"
+                                               Margin="40,0,0,0" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
                             <Button Style="{StaticResource SidebarButton}" Click="OpenLocation_Click">
                                 <StackPanel Orientation="Horizontal">
                                     <TextBlock Text="&#xE774;" FontFamily="{StaticResource IconFont}" FontSize="15" Width="28" />

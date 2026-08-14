@@ -8,6 +8,7 @@ NOIR is a modern, keyboard-first DVD, video, audio, and network-stream player fo
 - LibVLC 3 playback engine with hardware-decoding support
 - Local video and audio playback across common container and codec formats
 - Optical DVD and Blu-ray source discovery
+- One-click optical-disc eject with active-drive selection
 - `VIDEO_TS` and `BDMV` folder playback
 - DVD menu activation and `Alt` + arrow-key navigation
 - HTTP, HTTPS, RTSP, RTP, UDP, and direct network streams
@@ -29,7 +30,7 @@ NOIR bundles an open-source libaacs runtime for AACS integration. It does not bu
 
 When an AACS-protected Blu-ray is opened, NOIR uses the bundled 64-bit libaacs and libbluray modules. If the runtime is missing or damaged, NOIR reports `AACS REQUIRED` instead of remaining at `BUFFERING 0%`. A protected disc that does not begin playback within 35 seconds is stopped with an AACS-specific error rather than buffering indefinitely. Unprotected Blu-rays do not require a key database.
 
-For protected media, place your legally obtained plaintext `KEYDB.cfg` at `%APPDATA%\aacs\KEYDB.cfg` using **Quick Settings → Blu-ray AACS → Open key folder**. **Download AACS keys** accepts either plaintext or a ZIP download and extracts and validates the database before installing it. Finding a valid file does not prove that it contains a matching key for a particular disc; NOIR reports an unlock failure when playback cannot begin. A different compatible 64-bit `libaacs.dll` can be selected in Quick Settings and is validated and applied after NOIR restarts. The VideoLAN libaacs project supplies no keys or certificates; key material must be configured for the disc in accordance with local law, or the disc must be played with licensed Blu-ray playback software. Binary provenance, source links, and licenses for the replaceable bundled libraries are documented in `src/NoirMediaPlayer/ThirdParty/Aacs/README.md`.
+For protected media, place your legally obtained plaintext `KEYDB.cfg` at `%APPDATA%\aacs\KEYDB.cfg` using **Quick Settings → Blu-ray AACS → Open key folder**. **Download AACS keys** accepts either plaintext or a ZIP download and extracts and validates the database before installing it. If a ZIP archive has already been saved as `KEYDB.cfg`, NOIR repairs it automatically at startup and retains the archive as `KEYDB.cfg.backup`. Finding a valid file does not prove that it contains a matching key for a particular disc; NOIR reports an unlock failure when playback cannot begin. A different compatible 64-bit `libaacs.dll` can be selected in Quick Settings and is validated and applied after NOIR restarts. The VideoLAN libaacs project supplies no keys or certificates; key material must be configured for the disc in accordance with local law, or the disc must be played with licensed Blu-ray playback software. Binary provenance, source links, and licenses for the replaceable bundled libraries are documented in `src/NoirMediaPlayer/ThirdParty/Aacs/README.md`.
 
 ## Keyboard controls
 
@@ -51,6 +52,7 @@ For protected media, place your legally obtained plaintext `KEYDB.cfg` at `%APPD
 | `Ctrl` + `O` | Open media files |
 | `Ctrl` + `Shift` + `O` | Open a folder |
 | `Ctrl` + `D` | Open an optical disc |
+| `Ctrl` + `E` | Eject the active optical disc |
 | `Ctrl` + `L` | Open a network stream |
 | `Alt` + arrow keys | Navigate a DVD menu |
 | `Enter` | Activate a DVD menu item or play the selected queue item |

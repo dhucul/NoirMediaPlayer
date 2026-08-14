@@ -1,8 +1,10 @@
+using System.Buffers;
 using System.ComponentModel;
 using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -35,6 +37,10 @@ public static class AacsService
     private const string LibraryFileName = "libaacs.dll";
     private const long MaximumDownloadBytes = 128 * 1024 * 1024;
     private const long MaximumKeyDatabaseBytes = 256 * 1024 * 1024;
+    private const int MaximumValidationCharacters = 4 * 1024 * 1024;
+    private const int MaximumValidationLineCharacters = 16 * 1024;
+    private const int MaximumValidationLines = 10_000;
+    private static readonly TimeSpan KeyDatabaseDownloadTimeout = TimeSpan.FromSeconds(60);
     private const uint LoadLibrarySearchDllLoadDir = 0x00000100;
     private const uint LoadLibrarySearchDefaultDirs = 0x00001000;
 
@@ -47,6 +53,7 @@ public static class AacsService
     }
 
     private static readonly object SyncRoot = new();
+    private static readonly SemaphoreSlim KeyDatabaseInstallGate = new(1, 1);
     private static IntPtr _libraryHandle;
     private static AacsRuntimeStatus _status = new(
         AacsRuntimeState.NotConfigured,
@@ -62,6 +69,9 @@ public static class AacsService
         "aacs");
 
     public static string KeyDatabasePath => Path.Combine(KeyDatabaseDirectory, "KEYDB.cfg");
+
+    internal static Uri KeyDatabaseDownloadUri { get; } =
+        new("https://fvonline-db.bplaced.net/fv_download.php?lang=eng", UriKind.Absolute);
 
     public static AacsRuntimeStatus CurrentStatus
     {
@@ -259,6 +269,12 @@ public static class AacsService
     {
         try
         {
+            var fileLength = new FileInfo(path).Length;
+            if (fileLength == 0 || fileLength > MaximumKeyDatabaseBytes)
+            {
+                return false;
+            }
+
             using var stream = new FileStream(
                 path,
                 FileMode.Open,
@@ -266,55 +282,7 @@ public static class AacsService
                 FileShare.Read,
                 bufferSize: 4096);
             using var reader = new StreamReader(stream);
-
-            // KEYDB files can begin with blank lines and ';' or '#' comments. Look for
-            // a config record (| ... |) or a disc-key assignment instead of trusting
-            // only the filename or the first byte.
-            for (var lineNumber = 0; lineNumber < 10_000 && !reader.EndOfStream; lineNumber++)
-            {
-                var line = reader.ReadLine();
-                if (line is null)
-                {
-                    break;
-                }
-
-                var trimmed = line.TrimStart();
-                if (trimmed.Length == 0 || trimmed[0] is ';' or '#')
-                {
-                    continue;
-                }
-
-                if (trimmed.StartsWith("<!", StringComparison.Ordinal) ||
-                    trimmed.StartsWith("<html", StringComparison.OrdinalIgnoreCase) ||
-                    trimmed.StartsWith("<?xml", StringComparison.OrdinalIgnoreCase))
-                {
-                    return false;
-                }
-
-                if (trimmed[0] == '|' && trimmed.Count(character => character == '|') >= 3)
-                {
-                    return true;
-                }
-
-                var separatorIndex = trimmed.IndexOf('=');
-                if (separatorIndex > 0)
-                {
-                    var identifier = trimmed[..separatorIndex].Trim();
-                    if (identifier.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-                    {
-                        identifier = identifier[2..];
-                    }
-
-                    if (identifier.Length >= 16 && identifier.All(Uri.IsHexDigit))
-                    {
-                        return true;
-                    }
-                }
-
-                return false;
-            }
-
-            return false;
+            return ValidateKeyDatabaseText(reader);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -339,23 +307,32 @@ public static class AacsService
     public static async Task<AacsKeyDownloadResult> DownloadKeyDatabaseAsync(
         CancellationToken cancellationToken = default)
     {
-        const string keyDatabaseUrl = "http://fvonline-db.bplaced.net/fv_download.php?lang=eng";
         const string userAgent = "NoirMediaPlayer/1.0";
 
         try
         {
             Directory.CreateDirectory(KeyDatabaseDirectory);
 
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(KeyDatabaseDownloadTimeout);
             using var client = new HttpClient();
             client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
-            client.Timeout = TimeSpan.FromSeconds(60);
+            client.Timeout = Timeout.InfiniteTimeSpan;
 
             using var response = await client.GetAsync(
-                keyDatabaseUrl,
+                KeyDatabaseDownloadUri,
                 HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken).ConfigureAwait(false);
+                timeout.Token).ConfigureAwait(false);
 
             response.EnsureSuccessStatusCode();
+
+            var responseUri = response.RequestMessage?.RequestUri;
+            if (responseUri is null || !responseUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            {
+                return new AacsKeyDownloadResult(
+                    false,
+                    "The key database server redirected to an insecure connection.");
+            }
 
             var contentLength = response.Content.Headers.ContentLength;
             if (contentLength.HasValue && contentLength.Value == 0)
@@ -365,13 +342,20 @@ public static class AacsService
                     "The key database server returned an empty response. Try again later.");
             }
 
+            if (contentLength > MaximumDownloadBytes)
+            {
+                return new AacsKeyDownloadResult(
+                    false,
+                    "The key database download is unexpectedly large.");
+            }
+
             var temporaryPath = Path.Combine(
                 KeyDatabaseDirectory,
                 $".KEYDB.cfg.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp");
 
             try
             {
-                await using var sourceStream = await response.Content.ReadAsStreamAsync(cancellationToken)
+                await using var sourceStream = await response.Content.ReadAsStreamAsync(timeout.Token)
                     .ConfigureAwait(false);
                 await using var destinationStream = new FileStream(
                     temporaryPath,
@@ -385,8 +369,8 @@ public static class AacsService
                     sourceStream,
                     destinationStream,
                     MaximumDownloadBytes,
-                    cancellationToken).ConfigureAwait(false);
-                await destinationStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    timeout.Token).ConfigureAwait(false);
+                await destinationStream.FlushAsync(timeout.Token).ConfigureAwait(false);
             }
             catch
             {
@@ -402,12 +386,12 @@ public static class AacsService
                 throw;
             }
 
-            cancellationToken.ThrowIfCancellationRequested();
+            timeout.Token.ThrowIfCancellationRequested();
 
             return await InstallDownloadedKeyDatabaseAsync(
                 temporaryPath,
                 KeyDatabasePath,
-                cancellationToken).ConfigureAwait(false);
+                timeout.Token).ConfigureAwait(false);
         }
         catch (HttpRequestException exception)
         {
@@ -415,15 +399,15 @@ public static class AacsService
                 false,
                 $"Could not reach the key database server: {exception.Message}");
         }
-        catch (TaskCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new AacsKeyDownloadResult(false, "Key database download was cancelled.");
+        }
+        catch (OperationCanceledException)
         {
             return new AacsKeyDownloadResult(
                 false,
                 "Key database download timed out. Check your internet connection.");
-        }
-        catch (OperationCanceledException)
-        {
-            return new AacsKeyDownloadResult(false, "Key database download was cancelled.");
         }
         catch (Exception exception)
         {
@@ -439,9 +423,13 @@ public static class AacsService
         CancellationToken cancellationToken = default)
     {
         string? extractedPath = null;
-        var installed = false;
+        var gateEntered = false;
+        var downloadedIsDestination = PathsReferToSameFile(downloadedPath, destinationPath);
         try
         {
+            await KeyDatabaseInstallGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            gateEntered = true;
+
             if (!File.Exists(downloadedPath) || new FileInfo(downloadedPath).Length == 0)
             {
                 return new AacsKeyDownloadResult(
@@ -504,6 +492,11 @@ public static class AacsService
                     "The downloaded file does not appear to be a valid KEYDB.cfg. The server may have returned an error page.");
             }
 
+            if (!wasCompressed && downloadedIsDestination)
+            {
+                return new AacsKeyDownloadResult(true, "AACS key database is already installed as plaintext.");
+            }
+
             Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? Path.GetTempPath());
             var backupPath = destinationPath + ".backup";
             if (File.Exists(destinationPath))
@@ -514,7 +507,6 @@ public static class AacsService
             try
             {
                 File.Move(installationCandidate, destinationPath);
-                installed = true;
             }
             catch
             {
@@ -534,16 +526,164 @@ public static class AacsService
         }
         finally
         {
-            if (!installed || !string.Equals(downloadedPath, destinationPath, StringComparison.OrdinalIgnoreCase))
+            if (!downloadedIsDestination)
             {
                 TryDeleteFile(downloadedPath);
             }
 
-            if (extractedPath is not null &&
-                (!installed || !string.Equals(extractedPath, destinationPath, StringComparison.OrdinalIgnoreCase)))
+            if (extractedPath is not null)
             {
                 TryDeleteFile(extractedPath);
             }
+
+            if (gateEntered)
+            {
+                KeyDatabaseInstallGate.Release();
+            }
+        }
+    }
+
+    internal static async Task<AacsKeyDownloadResult?> RepairCompressedKeyDatabaseIfNeededAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (!File.Exists(path) || !IsZipArchive(path))
+            {
+                return null;
+            }
+
+            return await InstallDownloadedKeyDatabaseAsync(path, path, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return new AacsKeyDownloadResult(
+                false,
+                $"The compressed KEYDB.cfg could not be extracted automatically: {exception.Message}");
+        }
+    }
+
+    private static bool ValidateKeyDatabaseText(StreamReader reader)
+    {
+        var buffer = ArrayPool<char>.Shared.Rent(4096);
+        var line = new StringBuilder(256);
+        var totalCharacters = 0;
+        var lineCount = 0;
+        var skipLineFeed = false;
+        try
+        {
+            while (true)
+            {
+                var charactersRead = reader.Read(buffer, 0, buffer.Length);
+                if (charactersRead == 0)
+                {
+                    return line.Length > 0 && EvaluateKeyDatabaseLine(line) == true;
+                }
+
+                for (var index = 0; index < charactersRead; index++)
+                {
+                    var character = buffer[index];
+                    totalCharacters++;
+                    if (totalCharacters > MaximumValidationCharacters)
+                    {
+                        return false;
+                    }
+
+                    if (skipLineFeed)
+                    {
+                        skipLineFeed = false;
+                        if (character == '\n')
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (character is '\r' or '\n')
+                    {
+                        lineCount++;
+                        var lineResult = EvaluateKeyDatabaseLine(line);
+                        if (lineResult.HasValue)
+                        {
+                            return lineResult.Value;
+                        }
+
+                        if (lineCount >= MaximumValidationLines)
+                        {
+                            return false;
+                        }
+
+                        line.Clear();
+                        skipLineFeed = character == '\r';
+                        continue;
+                    }
+
+                    if (line.Length >= MaximumValidationLineCharacters)
+                    {
+                        return false;
+                    }
+
+                    line.Append(character);
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<char>.Shared.Return(buffer);
+        }
+    }
+
+    private static bool? EvaluateKeyDatabaseLine(StringBuilder line)
+    {
+        var trimmed = line.ToString().TrimStart();
+        if (trimmed.Length == 0 || trimmed[0] is ';' or '#')
+        {
+            return null;
+        }
+
+        if (trimmed.StartsWith("<!", StringComparison.Ordinal) ||
+            trimmed.StartsWith("<html", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.StartsWith("<?xml", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (trimmed[0] == '|' && trimmed.Count(character => character == '|') >= 3)
+        {
+            return true;
+        }
+
+        var separatorIndex = trimmed.IndexOf('=');
+        if (separatorIndex <= 0)
+        {
+            return false;
+        }
+
+        var identifier = trimmed[..separatorIndex].Trim();
+        if (identifier.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            identifier = identifier[2..];
+        }
+
+        return identifier.Length >= 16 && identifier.All(Uri.IsHexDigit);
+    }
+
+    private static bool PathsReferToSameFile(string firstPath, string secondPath)
+    {
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(firstPath),
+                Path.GetFullPath(secondPath),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return string.Equals(firstPath, secondPath, StringComparison.OrdinalIgnoreCase);
         }
     }
 

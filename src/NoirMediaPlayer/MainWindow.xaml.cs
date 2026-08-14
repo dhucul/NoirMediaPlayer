@@ -63,8 +63,11 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _discScanCancellation;
     private CancellationTokenSource? _settingsSaveCancellation;
     private CancellationTokenSource? _playbackStartupCancellation;
+    private CancellationTokenSource? _ejectCancellation;
     private Task? _sourceImportWorker;
     private Task? _discScanWorker;
+    private Task? _ejectTask;
+    private Task<AacsKeyDownloadResult?>? _aacsRepairTask;
     private Task? _settingsSaveTask;
     private Task? _playlistSaveTask;
     private Rect _restoreBounds;
@@ -363,6 +366,44 @@ public partial class MainWindow : Window
         StatusText.Text = "LibVLC ready · Drop media anywhere";
         Topmost = _settings.AlwaysOnTop;
 
+        _aacsRepairTask = Task.Run(
+            () => AacsService.RepairCompressedKeyDatabaseIfNeededAsync(
+                AacsService.KeyDatabasePath,
+                _lifetimeCancellation.Token),
+            _lifetimeCancellation.Token);
+        UpdateAacsStatus();
+        var repairTask = _aacsRepairTask;
+        try
+        {
+            var repairResult = await repairTask;
+            if (!_isClosing)
+            {
+                UpdateAacsStatus();
+                if (repairResult is { Success: false })
+                {
+                    ShowNotice(repairResult.Message);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Window shutdown canceled startup repair.
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+            if (!_isClosing)
+            {
+                ShowNotice("The compressed AACS key database could not be repaired");
+                UpdateAacsStatus();
+            }
+        }
+
+        if (_isClosing)
+        {
+            return;
+        }
+
         var launchFiles = Environment.GetCommandLineArgs().Skip(1).ToArray();
         if (launchFiles.Contains("--smoke-test", StringComparer.OrdinalIgnoreCase))
         {
@@ -410,6 +451,7 @@ public partial class MainWindow : Window
         _lifetimeCancellation.Cancel();
         _sourceImportCancellation?.Cancel();
         _discScanCancellation?.Cancel();
+        _ejectCancellation?.Cancel();
         _settingsSaveCancellation?.Cancel();
         CancelPlaybackStartupWatchdog();
         _uiTimer.Stop();
@@ -420,6 +462,8 @@ public partial class MainWindow : Window
         {
             _sourceImportWorker,
             _discScanWorker,
+            _ejectTask,
+            _aacsRepairTask,
             _settingsSaveTask,
             _playlistSaveTask
         }.Where(task => task is not null).Cast<Task>().ToArray();
@@ -592,6 +636,147 @@ public partial class MainWindow : Window
             }
 
             cancellation.Dispose();
+        }
+    }
+
+    private async void EjectDisc_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EjectDiscButton.IsEnabled)
+        {
+            return;
+        }
+
+        EjectDiscButton.IsEnabled = false;
+        var selectedSource = (PlaylistView.SelectedItem as PlaylistItem)?.Source;
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+        var previousCancellation = _ejectCancellation;
+        _ejectCancellation = cancellation;
+        previousCancellation?.Cancel();
+        var ejectTask = EjectDiscAsync(selectedSource, cancellation.Token);
+        _ejectTask = ejectTask;
+        try
+        {
+            await ejectTask;
+        }
+        catch (OperationCanceledException)
+        {
+            // Window shutdown or a superseding optical operation canceled ejection.
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+            if (!_isClosing)
+            {
+                StatusText.Text = "The disc could not be ejected";
+                ShowNotice("Disc eject failed");
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_ejectTask, ejectTask))
+            {
+                _ejectTask = null;
+            }
+
+            if (ReferenceEquals(_ejectCancellation, cancellation))
+            {
+                _ejectCancellation = null;
+            }
+
+            cancellation.Dispose();
+            if (!_isClosing)
+            {
+                EjectDiscButton.IsEnabled = true;
+            }
+        }
+    }
+
+    private async Task EjectDiscAsync(string? selectedSource, CancellationToken cancellationToken)
+    {
+        _discScanCancellation?.Cancel();
+        var gateEntered = false;
+        try
+        {
+            await _discScanGate.WaitAsync(cancellationToken);
+            gateEntered = true;
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var driveRoots = await Task.Run(DiscService.FindOpticalDriveRoots, cancellationToken);
+            var driveRoot = DiscService.SelectEjectTarget(
+                driveRoots,
+                _currentItem?.Source,
+                selectedSource);
+            if (driveRoot is null)
+            {
+                if (driveRoots.Count == 0)
+                {
+                    StatusText.Text = "No optical drive is available";
+                    ShowNotice("No optical drive found");
+                }
+                else
+                {
+                    StatusText.Text = "Choose a disc from the drive to eject";
+                    ShowNotice("Multiple optical drives found · Select a disc first");
+                }
+
+                return;
+            }
+
+            var currentDiscItem = _currentItem?.IsDisc == true &&
+                                  DiscService.IsDiscSourceOnDrive(_currentItem.Source, driveRoot)
+                ? _currentItem
+                : null;
+            if (currentDiscItem is not null)
+            {
+                PersistCurrentPosition(force: true);
+                currentDiscItem.IsPlaying = false;
+                ReleaseCurrentMedia();
+                PlayPauseButton.Content = "\uE768";
+            }
+
+            StatusText.Text = $"Ejecting {driveRoot}…";
+            var result = await DiscService.EjectAsync(driveRoot, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!result.Success)
+            {
+                EngineStatusText.Text = "EJECT FAILED";
+                EngineStatusDot.Fill = Brushes.OrangeRed;
+                StatusText.Text = "The disc could not be ejected";
+                ShowNotice(result.Message);
+                return;
+            }
+
+            var staleDiscItems = _playlist
+                .Where(item => item.IsDisc && DiscService.IsDiscSourceOnDrive(item.Source, driveRoot))
+                .ToArray();
+            foreach (var item in staleDiscItems)
+            {
+                item.IsPlaying = false;
+                _playlist.Remove(item);
+                _playlistSources.Remove(item.Source);
+            }
+
+            if (currentDiscItem is not null && ReferenceEquals(_currentItem, currentDiscItem))
+            {
+                _currentItem = null;
+                _currentIndex = -1;
+                ResetNowPlaying();
+            }
+            else if (_currentItem is not null)
+            {
+                _currentIndex = _playlist.IndexOf(_currentItem);
+            }
+
+            RefreshQueueState();
+            StatusText.Text = result.Message;
+            ShowNotice(result.Message);
+        }
+        finally
+        {
+            if (gateEntered)
+            {
+                _discScanGate.Release();
+            }
         }
     }
 
@@ -854,6 +1039,15 @@ public partial class MainWindow : Window
     {
         if (_isClosing || _playbackDisposed)
         {
+            return false;
+        }
+
+        if (item.IsDisc &&
+            _aacsRepairTask is { IsCompleted: false } &&
+            DiscService.IsAacsProtectedSource(item.Source))
+        {
+            StatusText.Text = "Preparing the AACS key database…";
+            ShowNotice("AACS key database repair is still running · Try again shortly");
             return false;
         }
 
@@ -1946,6 +2140,10 @@ public partial class MainWindow : Window
                     OpenDisc_Click(this, new RoutedEventArgs());
                     e.Handled = true;
                     return;
+                case Key.E:
+                    EjectDisc_Click(this, new RoutedEventArgs());
+                    e.Handled = true;
+                    return;
                 case Key.L:
                     OpenLocation_Click(this, new RoutedEventArgs());
                     e.Handled = true;
@@ -2456,6 +2654,13 @@ public partial class MainWindow : Window
     {
         if (AacsStatusText is null)
         {
+            return;
+        }
+
+        if (_aacsRepairTask is { IsCompleted: false })
+        {
+            AacsStatusText.Text = "Repairing compressed KEYDB.cfg…";
+            AacsStatusText.Foreground = Brushes.Goldenrod;
             return;
         }
 
