@@ -1,7 +1,22 @@
+using System.Diagnostics;
 using System.IO;
 using NoirMediaPlayer.Models;
 
 namespace NoirMediaPlayer.Services;
+
+/// <summary>
+/// Collects non-fatal problems hit while walking folders and playlists, so a scan that was
+/// truncated by an I/O error is not reported to the user as a complete one. Written from the
+/// background import worker and read from the UI thread.
+/// </summary>
+public sealed class MediaScanDiagnostics
+{
+    private int _faulted;
+
+    public bool Faulted => Volatile.Read(ref _faulted) != 0;
+
+    public void MarkFaulted() => Volatile.Write(ref _faulted, 1);
+}
 
 public static class MediaSourceService
 {
@@ -49,7 +64,10 @@ public static class MediaSourceService
         return true;
     }
 
-    public static IEnumerable<string> EnumerateFolder(string folder, CancellationToken cancellationToken = default)
+    public static IEnumerable<string> EnumerateFolder(
+        string folder,
+        CancellationToken cancellationToken = default,
+        MediaScanDiagnostics? diagnostics = null)
     {
         IEnumerable<string> files;
         try
@@ -61,8 +79,10 @@ public static class MediaSourceService
                 AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System
             });
         }
-        catch
+        catch (Exception exception)
         {
+            Debug.WriteLine(exception);
+            diagnostics?.MarkFaulted();
             yield break;
         }
 
@@ -79,8 +99,12 @@ public static class MediaSourceService
 
                 current = enumerator.Current;
             }
-            catch
+            catch (Exception exception)
             {
+                // A mid-walk failure (removed drive, dropped share) truncates the scan; record
+                // it so the caller does not present a partial result as a complete one.
+                Debug.WriteLine(exception);
+                diagnostics?.MarkFaulted();
                 yield break;
             }
 
@@ -92,7 +116,10 @@ public static class MediaSourceService
         }
     }
 
-    public static IEnumerable<string> ExpandFiles(IEnumerable<string> paths, CancellationToken cancellationToken = default)
+    public static IEnumerable<string> ExpandFiles(
+        IEnumerable<string> paths,
+        CancellationToken cancellationToken = default,
+        MediaScanDiagnostics? diagnostics = null)
     {
         foreach (var path in paths)
         {
@@ -105,7 +132,7 @@ public static class MediaSourceService
 
             if (Directory.Exists(path))
             {
-                foreach (var mediaPath in EnumerateFolder(path, cancellationToken))
+                foreach (var mediaPath in EnumerateFolder(path, cancellationToken, diagnostics))
                 {
                     yield return mediaPath;
                 }
@@ -120,7 +147,7 @@ public static class MediaSourceService
 
             if (PlaylistExtensions.Contains(Path.GetExtension(path)))
             {
-                foreach (var playlistPath in ReadM3u(path, cancellationToken))
+                foreach (var playlistPath in ReadM3u(path, cancellationToken, diagnostics))
                 {
                     yield return playlistPath;
                 }
@@ -151,12 +178,47 @@ public static class MediaSourceService
         {
             Source = normalizedLocation,
             Title = uri.Host,
-            Detail = normalizedLocation,
+            // Source keeps the credentials because playback needs them; Detail is rendered in
+            // the queue and the inspector, so it must not put a password on screen.
+            Detail = RedactCredentials(normalizedLocation),
             IsNetwork = true
         };
     }
 
-    private static IEnumerable<string> ReadM3u(string playlistPath, CancellationToken cancellationToken)
+    /// <summary>
+    /// Removes any <c>user:password@</c> userinfo from a network URI while leaving the rest of
+    /// it playable. Non-network sources are returned unchanged.
+    /// </summary>
+    public static string RedactCredentials(string source)
+    {
+        if (string.IsNullOrWhiteSpace(source) ||
+            !Uri.TryCreate(source, UriKind.Absolute, out var uri) ||
+            uri.IsFile ||
+            string.IsNullOrEmpty(uri.UserInfo))
+        {
+            return source;
+        }
+
+        try
+        {
+            return new UriBuilder(uri)
+            {
+                UserName = string.Empty,
+                Password = string.Empty
+            }.Uri.AbsoluteUri;
+        }
+        catch (Exception exception) when (exception is UriFormatException or ArgumentException)
+        {
+            // Never hand back the original on a formatting failure: that would leak the secret
+            // this method exists to remove.
+            return $"{uri.Scheme}://{uri.Host}";
+        }
+    }
+
+    private static IEnumerable<string> ReadM3u(
+        string playlistPath,
+        CancellationToken cancellationToken,
+        MediaScanDiagnostics? diagnostics)
     {
         var parent = Path.GetDirectoryName(playlistPath) ?? Environment.CurrentDirectory;
         IEnumerable<string> lines;
@@ -164,8 +226,10 @@ public static class MediaSourceService
         {
             lines = File.ReadLines(playlistPath);
         }
-        catch
+        catch (Exception exception)
         {
+            Debug.WriteLine(exception);
+            diagnostics?.MarkFaulted();
             yield break;
         }
 
@@ -182,8 +246,10 @@ public static class MediaSourceService
 
                 rawLine = enumerator.Current;
             }
-            catch
+            catch (Exception exception)
             {
+                Debug.WriteLine(exception);
+                diagnostics?.MarkFaulted();
                 yield break;
             }
 

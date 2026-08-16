@@ -27,8 +27,17 @@ public sealed class SettingsService
             "settings.json");
     }
 
+    /// <summary>
+    /// True when the settings file exists but could not be read because of a transient problem
+    /// (a sharing violation from a backup agent, a denied ACL, a disconnected profile share).
+    /// Saving is suppressed for the rest of the session so the intact file on disk is never
+    /// overwritten with the defaults the player fell back to.
+    /// </summary>
+    public bool LoadFailed { get; private set; }
+
     public PlayerSettings Load()
     {
+        LoadFailed = false;
         try
         {
             if (!File.Exists(_settingsPath))
@@ -52,14 +61,27 @@ public sealed class SettingsService
             var settings = JsonSerializer.Deserialize<PlayerSettings>(stream, JsonOptions) ?? new PlayerSettings();
             return Normalize(settings);
         }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // The file is intact but unreachable right now: fall back to defaults for this
+            // session without ever writing them back over the user's real settings.
+            LoadFailed = true;
+            return new PlayerSettings();
+        }
         catch
         {
+            // Genuinely unusable content (malformed JSON, wrong shape). Overwriting is correct.
             return new PlayerSettings();
         }
     }
 
     public async Task SaveAsync(PlayerSettings settings, CancellationToken cancellationToken = default)
     {
+        if (LoadFailed)
+        {
+            return;
+        }
+
         string content;
         try
         {
@@ -129,7 +151,11 @@ public sealed class SettingsService
             .Take(20)
             .ToList();
 
-        var resumePositions = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        // OrderedDictionary enumerates in insertion order by contract, so TakeLast really does
+        // keep the most recently recorded entries. The dictionary is also rebuilt here because
+        // System.Text.Json replaces the property with an instance that uses the default
+        // (case-sensitive) comparer, discarding the OrdinalIgnoreCase one from the initializer.
+        var resumePositions = new OrderedDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in (settings.ResumePositions ?? [])
                      .Where(entry => !string.IsNullOrWhiteSpace(entry.Key) && entry.Value > 0)
                      .TakeLast(MaxResumePositions))

@@ -2,6 +2,9 @@ using System.IO;
 
 namespace NoirMediaPlayer.Models;
 
+// ResumePositions uses OrderedDictionary so that "keep the newest N entries" is a documented
+// guarantee of the collection rather than an accident of Dictionary's internal layout.
+
 public sealed class PlayerSettings
 {
     public int Volume { get; set; } = 82;
@@ -16,7 +19,7 @@ public sealed class PlayerSettings
     public string AacsLibraryPath { get; set; } = string.Empty;
     public string LastFolder { get; set; } = string.Empty;
     public List<string> RecentFiles { get; set; } = [];
-    public Dictionary<string, long> ResumePositions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public OrderedDictionary<string, long> ResumePositions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public string SnapshotFolder { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Noir Snapshots");
 }

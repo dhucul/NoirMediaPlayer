@@ -52,12 +52,39 @@ public static class AacsService
         Ready
     }
 
+    private readonly record struct KeyDatabaseCacheEntry(
+        DateTime LastWriteTimeUtc,
+        long Length,
+        KeyDatabaseState State);
+
     private static readonly object SyncRoot = new();
     private static readonly SemaphoreSlim KeyDatabaseInstallGate = new(1, 1);
+
+    // One handler for the process: a per-download HttpClient leaves its socket in TIME_WAIT.
+    // The infinite timeout is deliberate - every call supplies its own CancellationToken.
+    private static readonly HttpClient KeyDatabaseClient = CreateKeyDatabaseClient();
+
     private static IntPtr _libraryHandle;
+
+    // Guarded by SyncRoot, like every other read of the key database state.
+    private static KeyDatabaseCacheEntry? _keyDatabaseCache;
+
     private static AacsRuntimeStatus _status = new(
         AacsRuntimeState.NotConfigured,
         "AACS component not configured");
+
+    private static HttpClient CreateKeyDatabaseClient()
+    {
+        var client = new HttpClient(new SocketsHttpHandler
+        {
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 3,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5)
+        });
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("NoirMediaPlayer/1.0");
+        client.Timeout = Timeout.InfiniteTimeSpan;
+        return client;
+    }
 
     public static string SupportDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -241,26 +268,51 @@ public static class AacsService
             keyDatabaseFound);
     }
 
+    /// <summary>
+    /// Drops the cached key database verdict so the next status read re-inspects the file.
+    /// </summary>
+    private static void InvalidateKeyDatabaseCache()
+    {
+        lock (SyncRoot)
+        {
+            _keyDatabaseCache = null;
+        }
+    }
+
     private static KeyDatabaseState InspectKeyDatabase(string path)
     {
         try
         {
-            if (!File.Exists(path) || new FileInfo(path).Length == 0)
+            var fileInfo = new FileInfo(path);
+            if (!fileInfo.Exists || fileInfo.Length == 0)
             {
+                _keyDatabaseCache = null;
                 return KeyDatabaseState.Missing;
             }
 
-            if (IsZipArchive(path))
+            // CurrentStatus is read from the UI thread on every settings-popup open, every
+            // playback attempt and every failure dialog. Re-parsing up to 4 MB of key database
+            // under SyncRoot each time would stall the dispatcher, so the verdict is cached
+            // against the file's write stamp and size and only recomputed when those change.
+            if (_keyDatabaseCache is { } cache &&
+                cache.LastWriteTimeUtc == fileInfo.LastWriteTimeUtc &&
+                cache.Length == fileInfo.Length)
             {
-                return KeyDatabaseState.Compressed;
+                return cache.State;
             }
 
-            return IsValidKeyDatabaseContent(path)
-                ? KeyDatabaseState.Ready
-                : KeyDatabaseState.Invalid;
+            var state = IsZipArchive(path)
+                ? KeyDatabaseState.Compressed
+                : IsValidKeyDatabaseContent(path)
+                    ? KeyDatabaseState.Ready
+                    : KeyDatabaseState.Invalid;
+
+            _keyDatabaseCache = new KeyDatabaseCacheEntry(fileInfo.LastWriteTimeUtc, fileInfo.Length, state);
+            return state;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            _keyDatabaseCache = null;
             return KeyDatabaseState.Invalid;
         }
     }
@@ -292,34 +344,40 @@ public static class AacsService
 
     private static bool IsZipArchive(string path)
     {
-        Span<byte> signature = stackalloc byte[4];
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        if (stream.Read(signature) != signature.Length)
+        try
+        {
+            Span<byte> signature = stackalloc byte[4];
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (stream.Length < signature.Length)
+            {
+                return false;
+            }
+
+            // Stream.Read may legally return fewer bytes than asked for; treating a short read
+            // as "not an archive" would install a ZIP as though it were a plaintext KEYDB.cfg.
+            stream.ReadExactly(signature);
+
+            return signature[0] == (byte)'P' &&
+                   signature[1] == (byte)'K' &&
+                   (signature[2], signature[3]) is ((3, 4) or (5, 6) or (7, 8));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return false;
         }
-
-        return signature[0] == (byte)'P' &&
-               signature[1] == (byte)'K' &&
-               (signature[2], signature[3]) is ((3, 4) or (5, 6) or (7, 8));
     }
 
     public static async Task<AacsKeyDownloadResult> DownloadKeyDatabaseAsync(
         CancellationToken cancellationToken = default)
     {
-        const string userAgent = "NoirMediaPlayer/1.0";
-
         try
         {
             Directory.CreateDirectory(KeyDatabaseDirectory);
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(KeyDatabaseDownloadTimeout);
-            using var client = new HttpClient();
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
-            client.Timeout = Timeout.InfiniteTimeSpan;
 
-            using var response = await client.GetAsync(
+            using var response = await KeyDatabaseClient.GetAsync(
                 KeyDatabaseDownloadUri,
                 HttpCompletionOption.ResponseHeadersRead,
                 timeout.Token).ConfigureAwait(false);
@@ -516,6 +574,11 @@ public static class AacsService
                 }
 
                 throw;
+            }
+            finally
+            {
+                // The file behind the cached verdict has just been replaced either way.
+                InvalidateKeyDatabaseCache();
             }
 
             return new AacsKeyDownloadResult(

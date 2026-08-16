@@ -79,11 +79,14 @@ public static class DiscService
         return result;
     }
 
-    public static IReadOnlyList<string> FindOpticalDriveRoots()
+    public static IReadOnlyList<string> FindOpticalDriveRoots(CancellationToken cancellationToken = default)
     {
         var result = new List<string>();
         foreach (var drive in DriveInfo.GetDrives())
         {
+            // Probing a spun-down or failing drive blocks, so the scan has to be interruptible
+            // between drives rather than only at the point it was scheduled.
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 if (drive.DriveType == DriveType.CDRom)
@@ -115,33 +118,12 @@ public static class DiscService
 
         try
         {
-            if (new DriveInfo(normalizedRoot).DriveType != DriveType.CDRom)
-            {
-                return new DiscEjectResult(false, $"{normalizedRoot} is not an optical drive.");
-            }
-
-            EjectAttempt attempt = default;
-            for (var attemptIndex = 0; attemptIndex <= EjectRetryDelays.Length; attemptIndex++)
-            {
-                timeout.Token.ThrowIfCancellationRequested();
-                attempt = await TryEjectOnceAsync(normalizedRoot, timeout.Token).ConfigureAwait(false);
-                if (attempt.Success)
-                {
-                    return new DiscEjectResult(true, $"Ejected {normalizedRoot}", normalizedRoot);
-                }
-
-                if (!IsTransientEjectError(attempt.ErrorCode) || attemptIndex == EjectRetryDelays.Length)
-                {
-                    break;
-                }
-
-                await Task.Delay(EjectRetryDelays[attemptIndex], timeout.Token).ConfigureAwait(false);
-            }
-
-            return new DiscEjectResult(
-                false,
-                $"Could not eject {normalizedRoot}: {new Win32Exception(attempt.ErrorCode).Message}",
-                normalizedRoot);
+            // DriveInfo probing and the CreateFile/DeviceIoControl prologue are blocking calls
+            // that would otherwise run on the caller's thread - the UI dispatcher - for as long
+            // as the drive takes to spin up. Task.Run keeps the whole native sequence off it.
+            return await Task.Run(
+                () => EjectCoreAsync(normalizedRoot, timeout.Token),
+                timeout.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -154,6 +136,39 @@ public static class DiscService
         {
             return new DiscEjectResult(false, $"Could not eject {normalizedRoot}: {exception.Message}", normalizedRoot);
         }
+    }
+
+    private static async Task<DiscEjectResult> EjectCoreAsync(
+        string normalizedRoot,
+        CancellationToken cancellationToken)
+    {
+        if (new DriveInfo(normalizedRoot).DriveType != DriveType.CDRom)
+        {
+            return new DiscEjectResult(false, $"{normalizedRoot} is not an optical drive.");
+        }
+
+        EjectAttempt attempt = default;
+        for (var attemptIndex = 0; attemptIndex <= EjectRetryDelays.Length; attemptIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            attempt = await TryEjectOnceAsync(normalizedRoot, cancellationToken).ConfigureAwait(false);
+            if (attempt.Success)
+            {
+                return new DiscEjectResult(true, $"Ejected {normalizedRoot}", normalizedRoot);
+            }
+
+            if (!IsTransientEjectError(attempt.ErrorCode) || attemptIndex == EjectRetryDelays.Length)
+            {
+                break;
+            }
+
+            await Task.Delay(EjectRetryDelays[attemptIndex], cancellationToken).ConfigureAwait(false);
+        }
+
+        return new DiscEjectResult(
+            false,
+            $"Could not eject {normalizedRoot}: {new Win32Exception(attempt.ErrorCode).Message}",
+            normalizedRoot);
     }
 
     internal static string? SelectEjectTarget(
@@ -327,6 +342,12 @@ public static class DiscService
         }
 
         using var completionEvent = new EventWaitHandle(false, EventResetMode.AutoReset);
+
+        // The kernel writes to this handle for as long as the I/O is pending, so it has to be
+        // kept from being released and recycled underneath the overlapped operation.
+        var eventHandleReferenced = false;
+        completionEvent.SafeWaitHandle.DangerousAddRef(ref eventHandleReferenced);
+
         var overlapped = new NativeOverlappedData
         {
             EventHandle = completionEvent.SafeWaitHandle.DangerousGetHandle()
@@ -383,6 +404,10 @@ public static class DiscService
             }
 
             Marshal.FreeHGlobal(overlappedPointer);
+            if (eventHandleReferenced)
+            {
+                completionEvent.SafeWaitHandle.DangerousRelease();
+            }
         }
     }
 

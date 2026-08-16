@@ -312,11 +312,16 @@ public sealed class ServiceRegressionTests
     {
         using var temp = new TempDirectory();
         var settingsPath = Path.Combine(temp.Path, "settings.json");
+        var resumePositions = new OrderedDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        foreach (var index in Enumerable.Range(0, 300))
+        {
+            resumePositions[$"video-{index}.mp4"] = index + 1;
+        }
+
         var settings = new PlayerSettings
         {
             Volume = 500,
-            ResumePositions = Enumerable.Range(0, 300)
-                .ToDictionary(index => $"video-{index}.mp4", index => (long)index + 1)
+            ResumePositions = resumePositions
         };
         File.WriteAllText(settingsPath, JsonSerializer.Serialize(settings));
 
@@ -326,6 +331,112 @@ public sealed class ServiceRegressionTests
         Assert.Equal(250, loaded.ResumePositions.Count);
         Assert.DoesNotContain("video-0.mp4", loaded.ResumePositions.Keys);
         Assert.Contains("video-299.mp4", loaded.ResumePositions.Keys);
+
+        // The trim must keep the newest entries in order, not an arbitrary 250 of them.
+        Assert.Equal("video-50.mp4", loaded.ResumePositions.Keys.First());
+        Assert.Equal("video-299.mp4", loaded.ResumePositions.Keys.Last());
+    }
+
+    [Fact]
+    public void SettingsLoad_MatchesKeysCaseInsensitivelyAfterARoundTrip()
+    {
+        using var temp = new TempDirectory();
+        var settingsPath = Path.Combine(temp.Path, "settings.json");
+        var resumePositions = new OrderedDictionary<string, long>(StringComparer.OrdinalIgnoreCase)
+        {
+            [@"C:\Media\Film.mkv"] = 42_000
+        };
+        File.WriteAllText(settingsPath, JsonSerializer.Serialize(new PlayerSettings
+        {
+            ResumePositions = resumePositions
+        }));
+
+        var loaded = new SettingsService(settingsPath).Load();
+
+        // System.Text.Json replaces the property with a default-comparer instance, so Normalize
+        // has to rebuild it or resume lookups start missing on a differently cased path.
+        Assert.True(loaded.ResumePositions.TryGetValue(@"c:\media\film.mkv", out var position));
+        Assert.Equal(42_000, position);
+    }
+
+    [Fact]
+    public async Task SettingsSave_IsSuppressedWhenTheExistingFileCouldNotBeRead()
+    {
+        using var temp = new TempDirectory();
+        var settingsPath = Path.Combine(temp.Path, "settings.json");
+        const string original = """{"Volume":11}""";
+        await File.WriteAllTextAsync(settingsPath, original);
+
+        var service = new SettingsService(settingsPath);
+        PlayerSettings loaded;
+        using (File.Open(settingsPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            loaded = service.Load();
+        }
+
+        Assert.True(service.LoadFailed);
+        Assert.Equal(82, loaded.Volume);
+
+        await service.SaveAsync(loaded);
+
+        // The intact file must survive: writing the fallback defaults over it would silently
+        // destroy the user's real settings.
+        Assert.Equal(original, await File.ReadAllTextAsync(settingsPath));
+    }
+
+    [Fact]
+    public void SettingsLoad_OverwritesGenuinelyCorruptContent()
+    {
+        using var temp = new TempDirectory();
+        var settingsPath = Path.Combine(temp.Path, "settings.json");
+        File.WriteAllText(settingsPath, "{ this is not json");
+
+        var service = new SettingsService(settingsPath);
+        var loaded = service.Load();
+
+        Assert.False(service.LoadFailed);
+        Assert.Equal(82, loaded.Volume);
+    }
+
+    [Theory]
+    [InlineData("rtsp://user:secret@camera.example/live", "rtsp://camera.example/live")]
+    [InlineData("https://user:secret@example.com/a.mp4?token=x", "https://example.com/a.mp4?token=x")]
+    [InlineData("https://example.com/a.mp4", "https://example.com/a.mp4")]
+    [InlineData(@"C:\Media\Film.mkv", @"C:\Media\Film.mkv")]
+    public void RedactCredentials_RemovesUserInfoAndLeavesEverythingElsePlayable(string source, string expected)
+    {
+        Assert.Equal(expected, MediaSourceService.RedactCredentials(source));
+    }
+
+    [Fact]
+    public void NetworkItem_KeepsCredentialsForPlaybackButNeverShowsThem()
+    {
+        var item = MediaSourceService.CreateNetworkItem("rtsp://user:secret@camera.example/live");
+
+        Assert.Contains("secret", item.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", item.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", item.Title, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FolderScan_ReportsATruncatedWalkInsteadOfLookingComplete()
+    {
+        using var temp = new TempDirectory();
+        File.WriteAllBytes(Path.Combine(temp.Path, "valid.mp3"), []);
+
+        var healthy = new MediaScanDiagnostics();
+        var found = MediaSourceService.ExpandFiles([temp.Path], CancellationToken.None, healthy).ToArray();
+
+        Assert.Single(found);
+        Assert.False(healthy.Faulted);
+
+        var faulted = new MediaScanDiagnostics();
+        var missing = MediaSourceService
+            .EnumerateFolder(Path.Combine(temp.Path, "does-not-exist"), CancellationToken.None, faulted)
+            .ToArray();
+
+        Assert.Empty(missing);
+        Assert.True(faulted.Faulted);
     }
 
     [Fact]
