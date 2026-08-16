@@ -72,6 +72,8 @@ dotnet run --project .\src\NoirMediaPlayer\NoirMediaPlayer.csproj
 
 The VideoLAN native runtime is restored through the `VideoLAN.LibVLC.Windows` NuGet package, so a separate VLC installation is not required.
 
+Building and publishing also run `tools\Generate-PluginCache.ps1`, which has libvlc write its plugin cache (`libvlc\win-x64\plugins\plugins.dat`) into the output. Without that cache libvlc loads every shipped plugin on each launch to read its descriptor, which costs roughly 80 ms warm and 290 ms on a cold file cache before the window can appear. Plugins that only serve features NOIR does not expose - stream output, muxers, visualisers, service discovery, capture and tuner inputs - are excluded from the build in `NoirMediaPlayer.csproj`.
+
 ## Project layout
 
 ```text

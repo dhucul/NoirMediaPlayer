@@ -10,9 +10,9 @@
     <RootNamespace>NoirMediaPlayer</RootNamespace>
     <Product>NOIR Media Player</Product>
     <Description>A cinematic DVD, video, audio, and network-stream player for Windows.</Description>
-    <Version>1.0.3</Version>
-    <AssemblyVersion>1.0.3.0</AssemblyVersion>
-    <FileVersion>1.0.3.0</FileVersion>
+    <Version>1.0.4</Version>
+    <AssemblyVersion>1.0.4.0</AssemblyVersion>
+    <FileVersion>1.0.4.0</FileVersion>
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -25,6 +25,81 @@
     <PackageReference Include="LibVLCSharp.WPF" Version="3.10.1" />
     <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" />
   </ItemGroup>
+
+  <!--
+    NOIR ships x64 only. The VideoLAN targets gate the other two runtimes on $(Platform), which
+    is AnyCPU here (Platforms/PlatformTarget do not set it), so without these switches every
+    build and publish also copies the x86 and arm64 runtimes - 182 MB and ~840 files that the
+    installer then discards.
+  -->
+  <PropertyGroup>
+    <VlcWindowsX86Enabled>false</VlcWindowsX86Enabled>
+    <VlcWindowsArm64Enabled>false</VlcWindowsArm64Enabled>
+  </PropertyGroup>
+
+  <!--
+    Plugins that are only reachable through features NOIR does not expose are left out of the
+    build entirely (%2A is an escaped '*', as the VideoLAN targets require). Everything a user
+    could actually open - every demuxer, decoder, subtitle renderer and input protocol NOIR
+    documents - is kept. Dropping these trims roughly 20 MB and ~55 files from the install.
+  -->
+  <ItemGroup>
+    <!-- The stream-output chain: transcoding, casting, recording, restreaming. Reachable only
+         through :sout=, which NOIR never sets. Muxers and output accesses serve sout alone. -->
+    <VlcWindowsX64ExcludeFiles Include="plugins\stream_out\%2A%2A" />
+    <VlcWindowsX64ExcludeFiles Include="plugins\access_output\%2A%2A" />
+    <VlcWindowsX64ExcludeFiles Include="plugins\mux\%2A%2A" />
+
+    <!-- Audio visualisers need the audio-visual option; NOIR has no visualiser. -->
+    <VlcWindowsX64ExcludeFiles Include="plugins\visualization\%2A%2A" />
+
+    <!-- Service discovery needs a MediaDiscoverer; NOIR enumerates drives itself in DiscService. -->
+    <VlcWindowsX64ExcludeFiles Include="plugins\services_discovery\%2A%2A" />
+
+    <!-- Wall/clone/panoramix splitters need the video-splitter option. -->
+    <VlcWindowsX64ExcludeFiles Include="plugins\video_splitter\%2A%2A" />
+
+    <!-- x264 10-bit is an encoder; NOIR only decodes. -->
+    <VlcWindowsX64ExcludeFiles Include="plugins\codec\libx26410b_plugin.dll" />
+
+    <!-- Capture and tuner inputs: no screen recording, TV tuner or capture UI exists. -->
+    <VlcWindowsX64ExcludeFiles Include="plugins\access\libscreen_plugin.dll" />
+    <VlcWindowsX64ExcludeFiles Include="plugins\access\libshm_plugin.dll" />
+    <VlcWindowsX64ExcludeFiles Include="plugins\access\libaccess_wasapi_plugin.dll" />
+    <VlcWindowsX64ExcludeFiles Include="plugins\access\libdtv_plugin.dll" />
+    <VlcWindowsX64ExcludeFiles Include="plugins\access\libsatip_plugin.dll" />
+    <VlcWindowsX64ExcludeFiles Include="plugins\access\libvdr_plugin.dll" />
+
+    <!-- imem is an embedder API driven by imem-* options NOIR never sets. -->
+    <VlcWindowsX64ExcludeFiles Include="plugins\access\libimem_plugin.dll" />
+    <VlcWindowsX64ExcludeFiles Include="plugins\access\libaccess_imem_plugin.dll" />
+
+    <!-- srt:// is not among the protocols NOIR offers, and the plugin is 4 MB. -->
+    <VlcWindowsX64ExcludeFiles Include="plugins\access\libaccess_srt_plugin.dll" />
+  </ItemGroup>
+
+  <!--
+    libvlc reads every plugin's descriptor at startup. Without plugins.dat it does that by
+    recursively browsing the plugin directory and LoadLibrary()ing all ~320 plugins, which
+    costs ~80 ms of CPU on every launch, ~290 ms on a cold file cache, and leaves ~100 MB of
+    plugin images mapped for the session - all of it before the window can be shown. The
+    cache reduces that to ~12 ms, so it is generated as part of the build and shipped.
+  -->
+  <PropertyGroup>
+    <LibVlcPluginCacheScript>$(MSBuildThisFileDirectory)..\..\tools\Generate-PluginCache.ps1</LibVlcPluginCacheScript>
+  </PropertyGroup>
+
+  <Target Name="GenerateLibVlcPluginCache"
+          AfterTargets="Build"
+          Condition="'$(OS)' == 'Windows_NT' And Exists('$(TargetDir)libvlc\win-x64\plugins')">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(LibVlcPluginCacheScript)&quot; -LibVlcDirectory &quot;$(TargetDir)libvlc\win-x64&quot;" />
+  </Target>
+
+  <Target Name="GenerateLibVlcPluginCacheOnPublish"
+          AfterTargets="Publish"
+          Condition="'$(OS)' == 'Windows_NT' And Exists('$(PublishDir)libvlc\win-x64\plugins')">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(LibVlcPluginCacheScript)&quot; -LibVlcDirectory &quot;$(PublishDir)libvlc\win-x64&quot;" />
+  </Target>
 
   <ItemGroup>
     <Content Include="ThirdParty\Aacs\*.dll">

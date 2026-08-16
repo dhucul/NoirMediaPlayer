@@ -18,6 +18,11 @@ public partial class App : Application
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
+
+        // Build the playback engine on a worker thread while this thread goes on to load the
+        // WPF assemblies and parse the XAML. MainWindow picks it up in its constructor, so a
+        // failure surfaces there, inside the handler that already reports engine faults.
+        StartupPrewarm.Begin();
     }
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

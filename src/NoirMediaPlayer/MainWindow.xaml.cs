@@ -25,7 +25,7 @@ namespace NoirMediaPlayer;
 public partial class MainWindow : Window
 {
     private readonly ObservableCollection<PlaylistItem> _playlist = [];
-    private readonly SettingsService _settingsService = new();
+    private readonly SettingsService _settingsService;
     private readonly SemaphoreSlim _sourceImportGate = new(1, 1);
     private readonly SemaphoreSlim _discScanGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCancellation = new();
@@ -121,23 +121,16 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
-        _settings = _settingsService.Load();
-
-        AacsService.Initialize(_settings.AacsLibraryPath);
-        var engineOptions = new List<string>
-        {
-            "--no-video-title-show",
-            "--file-caching=350",
-            "--network-caching=1200",
-            "--disc-caching=700",
-            _settings.HardwareDecoding ? "--avcodec-hw=any" : "--avcodec-hw=none"
-        };
+        // Settings, the AACS runtime and the engine were all prewarmed from App.OnStartup while
+        // WPF was loading itself, so this normally only collects the finished result.
+        _settingsService = StartupPrewarm.SettingsService;
+        _settings = StartupPrewarm.Settings;
 
         try
         {
-            Core.Initialize();
-            _libVlc = new LibVLC(engineOptions.ToArray());
-            _mediaPlayer = new VlcMediaPlayer(_libVlc);
+            var engine = StartupPrewarm.TakeEngine();
+            _libVlc = engine.LibVlc;
+            _mediaPlayer = engine.Player;
         }
         catch (Exception exception)
         {

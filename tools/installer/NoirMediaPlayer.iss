@@ -1,5 +1,5 @@
 #define AppName "NOIR Media Player"
-#define AppVersion "1.0.3"
+#define AppVersion "1.0.4"
 #define AppPublisher "NOIR"
 #define AppExeName "NoirMediaPlayer.exe"
 #define PublishDir "..\..\artifacts\publish\win-x64"
