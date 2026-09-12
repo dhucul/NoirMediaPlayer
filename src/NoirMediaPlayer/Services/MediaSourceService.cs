@@ -132,6 +132,11 @@ public static class MediaSourceService
 
             if (Directory.Exists(path))
             {
+                if (DiscService.CreateFromFolder(path) is { } disc)
+                {
+                    yield return disc.Source;
+                    continue;
+                }
                 foreach (var mediaPath in EnumerateFolder(path, cancellationToken, diagnostics))
                 {
                     yield return mediaPath;
@@ -142,6 +147,8 @@ public static class MediaSourceService
 
             if (!File.Exists(path))
             {
+                if (DiscService.CreateFromSource(path) is { } disc)
+                    yield return disc.Source;
                 continue;
             }
 
@@ -263,6 +270,12 @@ public static class MediaSourceService
             if (TryNormalizeNetworkLocation(line, out var networkLocation))
             {
                 yield return networkLocation;
+                continue;
+            }
+
+            if (DiscService.CreateFromSource(line) is { } disc)
+            {
+                yield return disc.Source;
                 continue;
             }
 

@@ -93,7 +93,9 @@ public sealed class SettingsService
             return;
         }
 
-        await _saveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // Even an uncontended gate must yield: profile-directory probes and File.Move are
+        // synchronous and may block, and shutdown needs to bound its wait from the UI thread.
+        await _saveGate.WaitAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         string? temporaryPath = null;
         try
         {
@@ -147,7 +149,7 @@ public sealed class SettingsService
             : settings.SnapshotFolder;
         settings.RecentFiles = (settings.RecentFiles ?? [])
             .Where(item => !string.IsNullOrWhiteSpace(item))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(MediaSourceComparer.Instance)
             .Take(20)
             .ToList();
 

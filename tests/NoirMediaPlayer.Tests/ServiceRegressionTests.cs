@@ -1,3 +1,4 @@
+using System.IO;
 using System.IO.Compression;
 using System.Text.Json;
 using NoirMediaPlayer.Models;
@@ -282,6 +283,41 @@ public sealed class ServiceRegressionTests
         Assert.True(result.Success, result.Message);
         Assert.Equal(content, await File.ReadAllTextAsync(path));
         Assert.False(File.Exists(path + ".backup"));
+    }
+
+    [Fact]
+    public async Task AacsReplacement_KeepsTheExistingDatabaseWhenCommitCannotProceed()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "KEYDB.cfg");
+        var download = Path.Combine(temp.Path, "download.cfg");
+        const string original = "0x00112233445566778899AABBCCDDEEFF = Original | V | 0x0011 |\n";
+        File.WriteAllText(path, original);
+        File.WriteAllText(download, original.Replace("Original", "Replacement"));
+        using (File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            await Assert.ThrowsAnyAsync<IOException>(() => AacsService.InstallDownloadedKeyDatabaseAsync(download, path));
+        Assert.Equal(original, File.ReadAllText(path));
+        Assert.False(File.Exists(download));
+    }
+
+    [Fact]
+    public async Task AacsReplacement_UpdatesAnExistingBackupOnEverySuccessfulCommit()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "KEYDB.cfg");
+        const string first = "0x00112233445566778899AABBCCDDEEFF = First | V | 0x0011 |\n";
+        var second = first.Replace("First", "Second");
+        var third = first.Replace("First", "Third");
+        File.WriteAllText(path, first);
+        foreach (var content in new[] { second, third })
+        {
+            var download = Path.Combine(temp.Path, "download.cfg");
+            File.WriteAllText(download, content);
+            var result = await AacsService.InstallDownloadedKeyDatabaseAsync(download, path);
+            Assert.True(result.Success);
+        }
+        Assert.Equal(third, File.ReadAllText(path));
+        Assert.Equal(second, File.ReadAllText(path + ".backup"));
     }
 
     [Fact]

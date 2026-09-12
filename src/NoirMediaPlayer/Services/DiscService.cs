@@ -212,6 +212,12 @@ public static class DiscService
 
     public static PlaylistItem? CreateFromFolder(string folder)
     {
+        var directory = new DirectoryInfo(folder);
+        if (directory.Name.Equals("VIDEO_TS", StringComparison.OrdinalIgnoreCase) ||
+            directory.Name.Equals("BDMV", StringComparison.OrdinalIgnoreCase))
+        {
+            folder = directory.Parent?.FullName ?? folder;
+        }
         if (Directory.Exists(Path.Combine(folder, "VIDEO_TS")) &&
             !Directory.Exists(Path.Combine(folder, "BDMV")))
         {
@@ -236,6 +242,21 @@ public static class DiscService
         }
 
         return null;
+    }
+
+    public static PlaylistItem? CreateFromSource(string source)
+    {
+        var isDvd = TryGetDiscFolder(source, "dvd", out var folder);
+        if (!isDvd && !TryGetDiscFolder(source, "bluray", out folder)) return null;
+        // Playlists may contain local disc roots, never remote authorities or UNC paths.
+        if (!Directory.Exists(Path.Combine(folder, isDvd ? "VIDEO_TS" : "BDMV"))) return null;
+        return new PlaylistItem
+        {
+            Source = CreateDiscSource(isDvd ? "dvd" : "bluray", folder),
+            Title = new DirectoryInfo(folder).Name,
+            Detail = isDvd ? "DVD folder" : "Blu-ray folder",
+            IsDisc = true
+        };
     }
 
     public static bool IsAacsProtectedSource(string source)
@@ -268,8 +289,11 @@ public static class DiscService
                 return false;
             }
 
-            folder = Path.GetFullPath(uri.LocalPath);
-            return Path.IsPathFullyQualified(folder);
+            var localPath = uri.LocalPath;
+            if (!Path.IsPathFullyQualified(localPath) || localPath.StartsWith(@"\\", StringComparison.Ordinal))
+                return false;
+            folder = Path.GetFullPath(localPath);
+            return !new Uri(folder).IsUnc;
         }
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
         {

@@ -557,23 +557,15 @@ public static class AacsService
 
             Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? Path.GetTempPath());
             var backupPath = destinationPath + ".backup";
-            if (File.Exists(destinationPath))
-            {
-                File.Move(destinationPath, backupPath, true);
-            }
-
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                File.Move(installationCandidate, destinationPath);
-            }
-            catch
-            {
-                if (File.Exists(backupPath) && !File.Exists(destinationPath))
-                {
-                    File.Move(backupPath, destinationPath);
-                }
-
-                throw;
+                // A single filesystem replacement keeps the destination present throughout
+                // commit, including if the application exits while installation is completing.
+                if (File.Exists(destinationPath))
+                    File.Replace(installationCandidate, destinationPath, backupPath);
+                else
+                    File.Move(installationCandidate, destinationPath);
             }
             finally
             {
