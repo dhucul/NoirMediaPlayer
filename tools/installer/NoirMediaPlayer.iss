@@ -1,5 +1,5 @@
 #define AppName "NOIR Media Player"
-#define AppVersion "1.0.7"
+#define AppVersion "1.0.8"
 #define AppPublisher "NOIR"
 #define AppExeName "NoirMediaPlayer.exe"
 #ifndef PublishDir
@@ -8,7 +8,7 @@
 #if !FileExists(PublishDir + "\\" + AppExeName)
   #error "Publish NOIR before compiling the installer, and pass /DPublishDir=<fresh publish directory>."
 #endif
-#if GetFileVersion(PublishDir + "\\" + AppExeName) != AppVersion + ".0"
+#if GetVersionNumbersString(PublishDir + "\\" + AppExeName) != AppVersion + ".0"
   #error "Published NOIR version does not match the installer. Publish the current release into a fresh directory."
 #endif
 
