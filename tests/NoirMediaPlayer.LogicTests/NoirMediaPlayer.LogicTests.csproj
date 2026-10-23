@@ -13,11 +13,33 @@
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\NoirMediaPlayer.SnapshotTestHost\NoirMediaPlayer.SnapshotTestHost.csproj"
+                      ReferenceOutputAssembly="false" OutputItemType="SnapshotTestHostOutput" />
+  </ItemGroup>
+  <Target Name="CopySnapshotTestHost" AfterTargets="Build">
+    <PropertyGroup>
+      <SnapshotHostDirectory>@(SnapshotTestHostOutput -> '%(RootDir)%(Directory)')</SnapshotHostDirectory>
+    </PropertyGroup>
+    <ItemGroup>
+      <SnapshotHostFiles Include="$(SnapshotHostDirectory)NoirMediaPlayer.SnapshotTestHost.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(SnapshotHostFiles)" DestinationFolder="$(TargetDir)SnapshotTestHost" />
+  </Target>
   <!-- Compile only the production logic under test. No app ProjectReference:
        this assembly cannot load the WPF player, VLC or Media Foundation. -->
   <ItemGroup>
     <Compile Include="..\..\src\NoirMediaPlayer\MainWindow.SubtitleRestoration.cs" Link="Production\MainWindow.SubtitleRestoration.cs" />
     <Compile Include="..\..\src\NoirMediaPlayer\MainWindow.VideoPresentation.cs" Link="Production\MainWindow.VideoPresentation.cs" />
+    <Compile Include="..\..\src\NoirMediaPlayer\MainWindow.PositionRestoration.cs" Link="Production\MainWindow.PositionRestoration.cs" />
+    <Compile Include="..\..\src\NoirMediaPlayer\MainWindow.WindowsStartup.cs" Link="Production\MainWindow.WindowsStartup.cs" />
+    <Compile Include="..\..\src\NoirMediaPlayer\MainWindow.Snapshots.cs" Link="Production\MainWindow.Snapshots.cs" />
+    <Compile Include="..\..\src\NoirMediaPlayer\Services\SnapshotWorker.cs" Link="Production\SnapshotWorker.cs" />
+    <Compile Include="..\..\src\NoirMediaPlayer\Services\SnapshotProcess.cs" Link="Production\SnapshotProcess.cs" />
+    <Compile Include="..\..\src\NoirMediaPlayer\Services\SnapshotProtocol.cs" Link="Production\SnapshotProtocol.cs" />
+    <Compile Include="..\..\src\NoirMediaPlayer\Services\SourceSnapshotRequest.cs" Link="Production\SourceSnapshotRequest.cs" />
+    <Compile Include="..\..\src\NoirMediaPlayer\Services\WindowsSnapshotHttpStream.cs" Link="Production\WindowsSnapshotHttpStream.cs" />
+    <Compile Include="..\..\src\NoirMediaPlayer\Services\PlaybackOperationQueue.cs" Link="Production\PlaybackOperationQueue.cs" />
     <Compile Include="..\..\src\NoirMediaPlayer\Services\PlainSubtitleTrack*.cs" Link="Production\%(Filename)%(Extension)" />
     <Compile Include="..\..\src\NoirMediaPlayer\Services\PlaybackSessionChoices.cs" Link="Production\PlaybackSessionChoices.cs" />
     <Compile Include="..\..\src\NoirMediaPlayer\Services\PlaybackRestorationPolicy.cs" Link="Production\PlaybackRestorationPolicy.cs" />

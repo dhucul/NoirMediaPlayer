@@ -223,7 +223,7 @@ public sealed partial class LogicAuditRegressionTests
         var skipped = Path.Combine(TestRoot(window), "must-not-be-written.png");
         var saved = true;
         await Field<PlaybackOperationQueue>(window, "_playbackOperations").Enqueue(() =>
-            saved = (bool)Invoke(window, "TrySaveWindowsAsfSnapshot", item.Source, skipped, kind is not ("rotation" or "aspect"))!);
+            saved = Invoke(window, "TryCreateWindowsAsfSnapshot", item.Source, kind is not ("rotation" or "aspect")) is not null);
         Assert.False(saved);
         Assert.False(File.Exists(skipped));
         var ranges = server?.RangeRequests;
@@ -269,7 +269,7 @@ public sealed partial class LogicAuditRegressionTests
         var saved = true;
         var skipped = Path.Combine(TestRoot(window), "wrong-caption.png");
         await Field<PlaybackOperationQueue>(window, "_playbackOperations").Enqueue(() =>
-            saved = (bool)Invoke(window, "TrySaveWindowsAsfSnapshot", second, skipped, true)!);
+            saved = Invoke(window, "TryCreateWindowsAsfSnapshot", second, true) is not null);
         Assert.False(saved);
         Assert.False(File.Exists(skipped));
         Assert.Equal(320, ReadCaptionBitmap(await CapturePlayerSnapshot(window)).PixelWidth);

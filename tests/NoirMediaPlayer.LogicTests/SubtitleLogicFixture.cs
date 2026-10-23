@@ -6,12 +6,11 @@ namespace NoirMediaPlayer
 {
     public partial class MainWindow
     {
-        private sealed class LogicItem { internal string Source => "logic-only.mp4"; }
-        private readonly LogicItem _currentItem = new();
+        private readonly Models.PlaylistItem _currentItem = new() { Source = "logic-only.mp4", Title = "Logic fixture" };
         private object? _currentMedia = new();
         private long _playbackGeneration;
         private bool _isClosing = false;
-        private LogicNativePlayer? _windowsPlayer = null;
+        private WindowsMediaEngine? _windowsPlayer = null;
         private readonly LogicMediaPlayer _mediaPlayer = new();
         private readonly LogicOperationQueue _playbackOperations = new();
         private readonly LogicVideoView VideoView = new();
@@ -20,8 +19,19 @@ namespace NoirMediaPlayer
         private bool CanReadPlayer => !_isClosing && _playbackOperations.IsIdle;
         private bool IsCurrentPlayback(long generation, object item) =>
             !_isClosing && generation == _playbackGeneration && ReferenceEquals(item, _currentItem);
-        private Task<bool> EnsureVlcForFeatureAsync() => Task.FromResult(_currentMedia is not null);
-        private Task PlayerCommandAsync(Action command, Action<LogicNativePlayer> nativeCommand)
+        private Task<bool> EnsureVlcForFeatureAsync()
+        {
+            if (_windowsPlayer is not null)
+            {
+                Fallbacks++;
+                _windowsPlayer.Dispose();
+                _windowsPlayer = null;
+                _playbackGeneration++;
+                _currentMedia = new();
+            }
+            return Task.FromResult(_currentMedia is not null);
+        }
+        private Task PlayerCommandAsync(Action command, Action<WindowsMediaEngine> nativeCommand)
         {
             if (_windowsPlayer is { } player) nativeCommand(player); else command();
             return Task.CompletedTask;
@@ -74,7 +84,7 @@ namespace NoirMediaPlayer
         internal void PrepareAspectForLogic(string? ratio, bool dvd) => PrepareCompatibilityVideoPresentation(ratio, dvd);
         internal Task NotifyVideoOutputForLogicAsync(bool available, string? ratio, long? generation = null) =>
             RefreshCompatibilityVideoPresentationAsync(generation ?? _playbackGeneration, ratio, available);
-        internal void UseNativeBackendForLogic() => _windowsPlayer = new LogicNativePlayer();
+        internal void UseNativeBackendForLogic() => _windowsPlayer = new WindowsMediaEngine();
         internal Task<bool> LoadSubtitleForLogicAsync(string path) => LoadExternalSubtitleAsync(path);
         internal (string? Path, int? Ordinal, string[] Files) CaptureSubtitleForLogic()
         {
@@ -110,7 +120,6 @@ namespace NoirMediaPlayer
             return QueueCompatibilitySubtitleCommandAsync(deadline,
                 () => IsCurrentPlayback(generation, _currentItem), command);
         }
-        private sealed class LogicNativePlayer { internal void SelectCaptionTrack(int id) { } }
     }
 
     internal sealed record LogicSubtitleId(int Id);
@@ -131,6 +140,17 @@ namespace NoirMediaPlayer
         internal bool AcceptSelection = true;
         internal int AddCalls;
         internal int SelectionCalls;
+        internal bool IsSeekable = true;
+        internal long Length = 60_000;
+        internal int VideoTrack = 0;
+        internal LogicSubtitleId[] VideoTrackDescription = [new(0)];
+        internal int SnapshotCalls;
+        internal bool TakeSnapshot(uint output, string path, uint width, uint height)
+        {
+            SnapshotCalls++;
+            File.WriteAllText(path, "fake compatibility image");
+            return true;
+        }
         internal bool? AttachmentRequestedSelection;
         internal bool AddSlave(LibVLCSharp.Shared.MediaSlaveType type, string uri, bool select)
         {

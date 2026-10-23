@@ -15,6 +15,9 @@ internal sealed unsafe partial class WindowsMediaEngine
     // Read the source at the playback clock, independently of the HWND renderer. This
     // captures decoded pixels at source resolution without capturing the desktop or HUD.
     internal void SaveSnapshot(string path, PlainSubtitleTrack? subtitles = null)
+        => SaveSourceSnapshot(CreateSnapshotRequest(subtitles), path);
+
+    internal SourceSnapshotRequest CreateSnapshotRequest(PlainSubtitleTrack? subtitles = null)
     {
         string source;
         string? contentType;
@@ -40,14 +43,20 @@ internal sealed unsafe partial class WindowsMediaEngine
                 throw new NotSupportedException("Network snapshots require a finite, seekable video source.");
         }
 
-        SaveSourceSnapshot(source, path, time, contentType, subtitles, manualRotation, embeddedCue);
+        return new SourceSnapshotRequest(source, time, contentType, subtitles, manualRotation, embeddedCue);
     }
+
+    internal static void SaveSourceSnapshot(SourceSnapshotRequest request, string path, CancellationToken cancellationToken = default) =>
+        SaveSourceSnapshot(request.Source, path, request.Time, request.ContentType, request.Subtitles,
+            request.Rotation, request.EmbeddedCue, cancellationToken);
 
     // Source Reader capture can also serve validated sources whose live playback
     // needs another backend. It does not seek, pause or recreate that player.
     internal static void SaveSourceSnapshot(string source, string path, long time,
-        string? contentType = null, PlainSubtitleTrack? subtitles = null, int manualRotation = 0, SubtitleCue? embeddedCue = null)
+        string? contentType = null, PlainSubtitleTrack? subtitles = null, int manualRotation = 0, SubtitleCue? embeddedCue = null,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (time < 0) throw new ArgumentOutOfRangeException(nameof(time));
         if (manualRotation is not (0 or 90 or 180 or 270)) throw new ArgumentOutOfRangeException(nameof(manualRotation));
         using var apartment = new ComApartment();
@@ -62,7 +71,7 @@ internal sealed unsafe partial class WindowsMediaEngine
             if (File.Exists(source)) Check(MFCreateSourceReaderFromURL(source, attributes, out reader));
             else
             {
-                httpStream = new WindowsSnapshotHttpStream(source);
+                httpStream = new WindowsSnapshotHttpStream(source, cancellationToken: cancellationToken);
                 Check(MFCreateMFByteStreamOnStream(httpStream, out byteStream));
                 var attributeId = new Guid("2CD2D921-C447-44A7-A13C-4ADABFC247E3");
                 Check(Marshal.QueryInterface(byteStream, in attributeId, out byteAttributes));
@@ -86,6 +95,7 @@ internal sealed unsafe partial class WindowsMediaEngine
             var frameFound = false;
             for (var attempt = 0; attempt < 600 && deadline.Elapsed < TimeSpan.FromSeconds(8); attempt++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 uint flags = 0, stream = 0;
                 long timestamp = 0;
                 nint sample = 0;
@@ -109,6 +119,7 @@ internal sealed unsafe partial class WindowsMediaEngine
                     throw new TimeoutException("Snapshot seeking took too long.");
             }
             if (!frameFound) throw new TimeoutException("Snapshot seeking took too long.");
+            cancellationToken.ThrowIfCancellationRequested();
             if (selectedSample == 0) throw new InvalidOperationException("No video frame is available at this position.");
             Check(((delegate* unmanaged[Stdcall]<nint, uint, nint*, int>)Slot(reader, 6))(reader, FirstVideoStream, &currentFormat));
             var outputRotation = SnapshotRotation(currentFormat);
@@ -121,6 +132,7 @@ internal sealed unsafe partial class WindowsMediaEngine
             encoder.Frames.Add(BitmapFrame.Create(bitmap));
             using var encoded = new MemoryStream();
             encoder.Save(encoded);
+            cancellationToken.ThrowIfCancellationRequested();
             File.WriteAllBytes(path, encoded.ToArray());
         }
         finally

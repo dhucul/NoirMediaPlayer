@@ -1374,7 +1374,7 @@ public partial class MainWindow : Window
                 // embedded cue. This also preserves subtitles-off on replay.
                 RestoreSubtitleSession(requestedSubtitles ?? (plan!.AutomaticSubtitles.Count > 0
                     ? new SubtitleSession(plan.AutomaticSubtitles.ToArray(), plan.SelectedSubtitlePath) : null), compatibility: false);
-                await StartWindowsPlaybackAsync(item, nativeWindow, generation, plan.DetectedContentType, rotation, ratio);
+                await StartWindowsPlaybackAsync(item, nativeWindow, generation, plan.DetectedContentType, ratio);
             }
             else
             {
@@ -1471,6 +1471,7 @@ public partial class MainWindow : Window
         if (_windowsPlayer is not null && _currentItem is { } replayItem)
             _replaySubtitles.Remember(replayItem, CaptureSubtitleSession());
         Interlocked.Increment(ref _playbackGeneration);
+        _snapshotCancellation?.Cancel();
         DetachPlaybackEvents();
         CancelPlaybackStartupWatchdog();
         var media = _currentMedia;
@@ -1490,8 +1491,7 @@ public partial class MainWindow : Window
         _compatibilityChapters = null;
         Interlocked.Exchange(ref _compatibilityChapterTime, -1);
         ClearSubtitleSession();
-        _pendingResumePosition = 0;
-        _hasPendingPosition = false;
+        ClearPendingPosition();
         SetPlaybackState(PlaybackState.Stopped);
         if (_playbackDisposed) return _playbackTeardownTask;
         _playbackTeardownTask = _playbackOperations.Enqueue(() =>
@@ -1525,31 +1525,6 @@ public partial class MainWindow : Window
     {
         try { await task.ConfigureAwait(false); }
         catch (Exception exception) { Debug.WriteLine(exception); }
-    }
-
-    private void TryApplyPendingResume(long generation, long length)
-    {
-        if (!_hasPendingPosition || generation != Interlocked.Read(ref _playbackGeneration) ||
-            length <= 0 || !CanReadPlayer || _playbackState is not (PlaybackState.Playing or PlaybackState.Paused) ||
-            !PlaybackIsSeekable) return;
-        // Complete compatibility stream selection and the requested pause before
-        // seeking. Adding captions or changing audio can otherwise reset the clock.
-        if (_windowsPlayer is null && (_pauseAfterStart || _pendingCompatibilitySubtitles is not null ||
-            _pendingCompatibilityAudioOrdinal is not null)) return;
-        var resumeAt = PlaybackResumePolicy.Resolve(_pendingResumePosition, length, _pendingPositionIsExplicit);
-        _hasPendingPosition = false;
-        _pendingResumePosition = 0;
-        if (resumeAt is { } position)
-        {
-            _lastPlaybackTime = position;
-            _ = PlayerCommandAsync(() => RestoreCompatibilityPosition(position), player => player.Time = position);
-            ShowNotice($"Resumed at {FormatTime(position)}");
-        }
-        else if (_currentItem is not null)
-        {
-            _settings.ResumePositions.Remove(_currentItem.Source);
-            ScheduleSettingsSave();
-        }
     }
 
     private void StartPlaybackStartupWatchdog(PlaylistItem item, long generation)
@@ -2103,22 +2078,16 @@ public partial class MainWindow : Window
 
         try
         {
-            Directory.CreateDirectory(_settings.SnapshotFolder);
             var safeTitle = string.Concat(_currentItem.Title.Select(character =>
                 Path.GetInvalidFileNameChars().Contains(character) ? '_' : character));
             var fileName = $"{safeTitle} {DateTime.Now:yyyy-MM-dd HH-mm-ss-fffffff}.png";
             var path = Path.Combine(_settings.SnapshotFolder, fileName);
-            var success = false;
-            var subtitles = _selectedPlainSubtitle;
-            var source = _currentItem.Source;
+            var item = _currentItem;
             var originalPresentation = !_currentItem.IsDisc && _rotation == 0 &&
                 string.IsNullOrWhiteSpace((AspectRatioComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString());
-            var nativeAttempted = false;
-            await PlayerCommandAsync(() => success = (!nativeAttempted && TrySaveWindowsAsfSnapshot(source, path, originalPresentation)) ||
-                    _mediaPlayer.TakeSnapshot(0, path, 0, 0),
-                player => { nativeAttempted = true; player.SaveSnapshot(path, subtitles); success = true; });
-            if (_isClosing) return;
-            ShowNotice(success ? $"Snapshot saved · {fileName}" : "Snapshot is not available for this source");
+            var success = await CaptureSnapshotAsync(path, originalPresentation);
+            if (_isClosing || !ReferenceEquals(item, _currentItem)) return;
+            if (success) ShowNotice($"Snapshot saved · {fileName}");
         }
         catch
         {

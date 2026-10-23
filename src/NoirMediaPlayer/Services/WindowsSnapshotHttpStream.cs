@@ -31,7 +31,8 @@ internal sealed class WindowsSnapshotHttpStream : IStream, IDisposable
     internal long Length { get; private set; }
     internal string ContentType { get; private set; } = "application/octet-stream";
 
-    internal WindowsSnapshotHttpStream(string source, TimeSpan? timeout = null, long byteLimit = 64 * 1024 * 1024)
+    internal WindowsSnapshotHttpStream(string source, TimeSpan? timeout = null, long byteLimit = 64 * 1024 * 1024,
+        CancellationToken cancellationToken = default)
     {
         if (!Uri.TryCreate(source, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") ||
             string.IsNullOrEmpty(uri.Host) || !string.IsNullOrEmpty(uri.UserInfo))
@@ -39,7 +40,8 @@ internal sealed class WindowsSnapshotHttpStream : IStream, IDisposable
         if (byteLimit < BlockSize) throw new ArgumentOutOfRangeException(nameof(byteLimit));
         _source = uri;
         _byteLimit = byteLimit;
-        _deadline = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(8));
+        _deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _deadline.CancelAfter(timeout ?? TimeSpan.FromSeconds(8));
         _token = _deadline.Token;
         _client = new HttpClient(new SocketsHttpHandler
         {

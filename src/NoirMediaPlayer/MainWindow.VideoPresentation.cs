@@ -1,7 +1,12 @@
+using NoirMediaPlayer.Services;
+
 namespace NoirMediaPlayer;
 
 public partial class MainWindow
 {
+    private void ApplyCurrentNativeRotation(WindowsMediaEngine player) =>
+        player.SetRotation(Volatile.Read(ref _rotation));
+
     private void PrepareCompatibilityVideoPresentation(string? ratio, bool dvd)
     {
         // A newly embedded DVD output can retain its initial renderer viewport

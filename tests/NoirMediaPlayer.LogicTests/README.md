@@ -25,6 +25,23 @@ DVD startup cases also verify that a temporary engine aspect is prepared before
 playback and replaced with the selected ratio when the video output becomes
 available. Other sources start with their selected ratio directly.
 
+The startup, position-restoration and snapshot partials are also linked directly.
+Regressions cover rotation changed before queued native creation, stale startup,
+zero/unknown/nonseekable positions, delayed metadata, and discovery expiration.
+Manual clocks advance the two-second restoration and ten-second capture deadlines.
+Snapshot tests launch `NoirMediaPlayer.SnapshotTestHost`, a managed console helper
+with no WPF, native decoder or graphics references. It shares the production pipe
+protocol and parent-disconnect watchdog, replacing decoding with tiny text files
+or an eight-second bounded sleep. The production process launcher kills and reaps
+these children on timeout/cancellation, including when a pipe write is blocked by
+a child that never reads its input. Tests verify retry without app restart, the
+single-child cap, transport/stop/close responsiveness, partial-output cleanup,
+destination collisions, launch/decoder failures, compatibility fallback, parent
+disconnect, and preservation of time, rotation, Unicode captions and styles.
+Protocol tests cover null, invalid, truncated and oversized requests. Process
+tests run sequentially with a 50 ms pause before each launch and bounded waits.
+They neither decode media nor allocate graphics surfaces.
+
 Run this project explicitly when playback/GPU tests are prohibited:
 
 ```powershell
