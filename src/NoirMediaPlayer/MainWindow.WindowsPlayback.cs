@@ -227,6 +227,32 @@ public partial class MainWindow
             throw new InvalidOperationException("The compatibility player could not select the audio track.");
     }
 
+    private async Task<bool> RestartCompatibilityPresentationAsync(PlaylistItem item)
+    {
+        if (!await EnsureVlcForFeatureAsync() || !ReferenceEquals(item, _currentItem)) return false;
+        var generation = Interlocked.Read(ref _playbackGeneration);
+        PlaybackSessionChoices<SubtitleSession>? choices = null;
+        try
+        {
+            await _playbackOperations.Enqueue(() =>
+            {
+                if (_isClosing || generation != Interlocked.Read(ref _playbackGeneration)) return;
+                var audioIds = _mediaPlayer.AudioTrackDescription.Where(track => track.Id >= 0).Select(track => track.Id).ToArray();
+                choices = PlaybackSessionChoices<SubtitleSession>.Capture(_mediaPlayer.Time,
+                    _mediaPlayer.State == VLCState.Paused, audioIds, _mediaPlayer.AudioTrack, CaptureCompatibilitySubtitleSession());
+            });
+            if (!IsCurrentPlayback(generation, item) || choices is null) return false;
+            return await PlayItemCore(item, allowResume: false, requestedPosition: choices.Position, forceVlc: true,
+                pauseAfterStart: choices.Paused, requestedAudioOrdinal: choices.AudioOrdinal, requestedSubtitles: choices.Subtitles);
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(exception);
+            if (IsCurrentPlayback(generation, item)) ShowNotice("The current track choices could not be retained for rotation");
+            return false;
+        }
+    }
+
     private void TryApplyPendingCompatibilityAudio()
     {
         if (_pendingCompatibilityAudioOrdinal is not { } ordinal || _windowsPlayer is not null || !CanReadPlayer ||
@@ -236,7 +262,8 @@ public partial class MainWindow
         // Even "audio off" must wait for the input's audio inventory. Restore it
         // after captions, then apply the saved position. Changing VLC's streams
         // after a paused seek can move the input clock away from its target.
-        if (_mediaPlayer.AudioTrackDescription.Count(track => track.Id >= 0) <= Math.Max(0, ordinal)) return;
+        // The restore owns the discovery deadline as well as the selection wait.
+        // Never leave an undiscovered ordinal pending without a terminal outcome.
         _compatibilityAudioRestoreTask = RestoreCompatibilityAudioAsync(ordinal, Interlocked.Read(ref _playbackGeneration));
         _ = ObserveTaskAsync(_compatibilityAudioRestoreTask);
     }
@@ -247,30 +274,61 @@ public partial class MainWindow
         bool Current() => !_isClosing && generation == Interlocked.Read(ref _playbackGeneration) &&
             _windowsPlayer is null && media is not null && ReferenceEquals(media, _currentMedia);
 
-        var selectedId = -1;
-        // Use the queue directly: ordinary fallback commands wait for restoration.
-        await _playbackOperations.Enqueue(() =>
+        var deadline = new PlaybackRestorationDeadline(TimeSpan.FromSeconds(5));
+        try
         {
+            while (Current())
+            {
+                deadline.ThrowIfExpired("The compatibility player did not discover the requested audio track.");
+                if (CanReadPlayer && _mediaPlayer.AudioTrackDescription.Count(track => track.Id >= 0) > Math.Max(0, ordinal)) break;
+                await Task.Delay(20);
+            }
             if (!Current()) return;
-            var tracks = _mediaPlayer.AudioTrackDescription.Where(track => track.Id >= 0).ToArray();
-            if (ordinal >= tracks.Length || ordinal < -1)
-                throw new InvalidOperationException("The audio track is unavailable in compatibility playback.");
-            selectedId = ordinal < 0 ? -1 : tracks[ordinal].Id;
-            if (!_mediaPlayer.SetAudioTrack(selectedId))
-                throw new InvalidOperationException("The compatibility player could not restore the audio selection.");
-        });
-        var clock = Stopwatch.StartNew();
-        while (Current() && (!CanReadPlayer || _mediaPlayer.AudioTrack != selectedId))
-        {
-            if (clock.Elapsed >= TimeSpan.FromSeconds(5))
-                throw new TimeoutException("The restored audio selection did not become active.");
-            await Task.Delay(20);
+            var selectedId = -1;
+            // Use the queue directly: ordinary fallback commands wait for restoration.
+            var selection = _playbackOperations.Enqueue(() =>
+            {
+                if (!Current()) return;
+                var tracks = _mediaPlayer.AudioTrackDescription.Where(track => track.Id >= 0).ToArray();
+                if (ordinal >= tracks.Length || ordinal < -1)
+                    throw new InvalidOperationException("The audio track is unavailable in compatibility playback.");
+                selectedId = ordinal < 0 ? -1 : tracks[ordinal].Id;
+                if (!_mediaPlayer.SetAudioTrack(selectedId))
+                    throw new InvalidOperationException("The compatibility player could not restore the audio selection.");
+            });
+            _ = ObserveTaskAsync(selection);
+            await selection.WaitAsync(deadline.Remaining);
+            deadline.ThrowIfExpired("The restored audio selection did not become active.");
+            while (Current() && (!CanReadPlayer || _mediaPlayer.AudioTrack != selectedId))
+            {
+                deadline.ThrowIfExpired("The restored audio selection did not become active.");
+                await Task.Delay(20);
+            }
+            if (Current() && _pendingCompatibilityAudioOrdinal == ordinal)
+            {
+                _pendingCompatibilityAudioOrdinal = null;
+                _refreshMetadata = true;
+            }
         }
-        if (Current() && _pendingCompatibilityAudioOrdinal == ordinal)
+        catch (Exception exception)
         {
-            _pendingCompatibilityAudioOrdinal = null;
-            _refreshMetadata = true;
+            if (Current()) FailCompatibilityRestoration(generation, "audio selection", exception);
+            throw;
         }
+    }
+
+    private void FailCompatibilityRestoration(long generation, string feature, Exception exception)
+    {
+        if (_isClosing || generation != Interlocked.Read(ref _playbackGeneration)) return;
+        Debug.WriteLine(exception);
+        _ = ReleaseCurrentMedia();
+        SetPlaybackState(PlaybackState.Error);
+        EngineStatusText.Text = "RESTORE FAILED";
+        EngineStatusDot.Fill = Brushes.OrangeRed;
+        StatusText.Text = $"Compatibility playback could not restore {feature}";
+        StatusDot.Fill = Brushes.OrangeRed;
+        SetVideoSurfaceActive(false);
+        ShowNotice($"Could not restore {feature} · {exception.Message}");
     }
 
     private void RestoreCompatibilityPosition(long position)
@@ -304,10 +362,10 @@ public partial class MainWindow
         for (var attempt = 0; attempt < 400; attempt++)
         {
             if (!IsCurrentPlayback(generation, item)) return false;
-            if (_compatibilityAudioRestoreTask is { IsFaulted: true }) return false;
-            if (_playbackState is PlaybackState.Playing or PlaybackState.Paused &&
-                !_pauseAfterStart && !_hasPendingPosition && _pendingCompatibilityAudioOrdinal is null &&
-                _pendingCompatibilitySubtitles is null && CanReadPlayer)
+            if (PlaybackRestorationPolicy.Failed(_compatibilityAudioRestoreTask, _compatibilitySubtitleRestoreTask)) return false;
+            if (PlaybackRestorationPolicy.IsReady(_playbackState, _pauseAfterStart, _hasPendingPosition,
+                _pendingCompatibilityAudioOrdinal is not null, _pendingCompatibilitySubtitles is not null || _compatibilitySubtitleLoadInProgress,
+                _compatibilityAudioRestoreTask, _compatibilitySubtitleRestoreTask) && CanReadPlayer)
             {
                 // Publish the restored IDs and selection before dependent controls
                 // run; the metadata timer may still show the pre-restore choice.
@@ -358,7 +416,7 @@ public partial class MainWindow
     {
         if (_isClosing || _playbackDisposed) return;
         var player = _windowsPlayer;
-        if (windowsCommand is null && (player is not null || _pendingCompatibilitySubtitles is not null ||
+        if (windowsCommand is null && (player is not null || _pendingCompatibilitySubtitles is not null || _compatibilitySubtitleLoadInProgress ||
             _pendingCompatibilityAudioOrdinal is not null))
         {
             if (!await EnsureVlcForFeatureAsync()) return;

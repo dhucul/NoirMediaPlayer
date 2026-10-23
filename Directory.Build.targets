@@ -1,0 +1,8 @@
+<Project>
+  <Target Name="RequireWindowsX64" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(Platform)' != 'x64' Or '$(PlatformTarget)' != 'x64'"
+           Text="NOIR supports Windows x64 only. Build with -p:Platform=x64." />
+    <Error Condition="'$(RuntimeIdentifier)' != '' And '$(RuntimeIdentifier)' != 'win-x64'"
+           Text="NOIR supports only the win-x64 runtime." />
+  </Target>
+</Project>

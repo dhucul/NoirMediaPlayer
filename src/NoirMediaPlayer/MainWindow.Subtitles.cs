@@ -1,23 +1,14 @@
-using System.IO;
-using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Windows.Controls;
 using System.Windows.Threading;
-using LibVLCSharp.Shared;
 using NoirMediaPlayer.Services;
 
 namespace NoirMediaPlayer;
 
 public partial class MainWindow
 {
-    private sealed record SubtitleSession(PlainSubtitleTrack[] Tracks, string? SelectedPath, int? SelectedEmbeddedOrdinal = null);
-    private readonly List<PlainSubtitleTrack> _plainSubtitles = [];
-    private readonly ConcurrentDictionary<int, PlainSubtitleTrack> _compatibilityPlainSubtitles = new();
-    private PlainSubtitleTrack? _selectedPlainSubtitle;
-    private SubtitleSession? _pendingCompatibilitySubtitles;
+    private readonly PlaybackReplayMemory<SubtitleSession> _replaySubtitles = new();
     private Task? _compatibilitySubtitleRestoreTask;
     private DispatcherTimer? _subtitleTimer;
-    private int? _selectedEmbeddedSubtitleOrdinal;
 
     private SubtitleSession? CaptureSubtitleSession() => _plainSubtitles.Count == 0 && _selectedEmbeddedSubtitleOrdinal is null ? null :
         new SubtitleSession(_plainSubtitles.ToArray(), _selectedPlainSubtitle?.Path, _selectedEmbeddedSubtitleOrdinal);
@@ -41,88 +32,6 @@ public partial class MainWindow
             finally { _isRefreshingTracks = wasRefreshing; }
             _refreshMetadata = true;
         }
-    }
-
-    private async Task<bool> LoadExternalSubtitleAsync(string path)
-    {
-        var item = _currentItem;
-        var generation = Interlocked.Read(ref _playbackGeneration);
-        if (item is null || _isClosing) return false;
-        var track = await Task.Run(() => PlainSubtitleTrack.TryLoad(path));
-        if (!IsCurrentPlayback(generation, item)) return false;
-        // MPEG caption clocks and paused snapshot composition still require VLC.
-        // Switch before presenting a native cue that cannot survive that handoff.
-        if (track is not null && _windowsPlayer is not null && MpegStreamInspection.SupportsExtension(item.Source))
-        {
-            // Carry the request in the restored inventory. Otherwise VLC may
-            // discover this newly created sidecar and then add the same file again.
-            _plainSubtitles.Add(track);
-            _selectedPlainSubtitle = track;
-            _selectedEmbeddedSubtitleOrdinal = -1;
-            return await EnsureVlcForFeatureAsync() && ReferenceEquals(item, _currentItem) && !_isClosing;
-        }
-        if (track is not null && _windowsPlayer is not null)
-        {
-            _plainSubtitles.RemoveAll(previous => previous.Path.Equals(track.Path, StringComparison.OrdinalIgnoreCase));
-            _plainSubtitles.Add(track);
-            _selectedPlainSubtitle = track;
-            _selectedEmbeddedSubtitleOrdinal = -1;
-            await PlayerCommandAsync(() => { }, player => player.SelectCaptionTrack(-1));
-            if (!IsCurrentPlayback(generation, item)) return false;
-            RefreshSubtitleClock();
-            UpdateNativeSubtitles(PlaybackTime);
-            RefreshTrackSelectors();
-            return true;
-        }
-        if (!await EnsureVlcForFeatureAsync()) return false;
-        generation = Interlocked.Read(ref _playbackGeneration);
-        var media = _currentMedia;
-        bool Current() => IsCurrentPlayback(generation, item) && media is not null && ReferenceEquals(media, _currentMedia);
-        var previousIds = new HashSet<int>();
-        var added = false;
-        await _playbackOperations.Enqueue(() =>
-        {
-            if (!Current()) return;
-            previousIds = _mediaPlayer.SpuDescription.Where(option => option.Id >= 0).Select(option => option.Id).ToHashSet();
-            added = _mediaPlayer.AddSlave(MediaSlaveType.Subtitle, new Uri(path).AbsoluteUri, true);
-        });
-        if (!added || !Current()) return false;
-
-        // AddSlave's selection request can race an earlier restored track. Identify
-        // the new input and confirm its selection before reporting a successful load.
-        var clock = Stopwatch.StartNew();
-        int? selectedId = null;
-        var identified = false;
-        while (Current() && clock.Elapsed < TimeSpan.FromSeconds(5))
-        {
-            if (CanReadPlayer)
-            {
-                var addedIds = _mediaPlayer.SpuDescription.Where(option => option.Id >= 0 && !previousIds.Contains(option.Id)).Select(option => option.Id).ToArray();
-                if (addedIds.Length > 0)
-                {
-                    selectedId = addedIds.Contains(_mediaPlayer.Spu) ? _mediaPlayer.Spu : addedIds[0];
-                    identified = addedIds.Length == 1;
-                    break;
-                }
-            }
-            await Task.Delay(20);
-        }
-        if (!Current() || selectedId is null) return false;
-        await _playbackOperations.Enqueue(() =>
-        {
-            if (Current() && _mediaPlayer.Spu != selectedId.Value) _mediaPlayer.SetSpu(selectedId.Value);
-        });
-        while (Current() && clock.Elapsed < TimeSpan.FromSeconds(5))
-        {
-            if (CanReadPlayer && _mediaPlayer.Spu == selectedId.Value)
-            {
-                if (identified && track is not null) _compatibilityPlainSubtitles[selectedId.Value] = track;
-                RefreshTrackSelectors();
-                return true;
-            }
-            await Task.Delay(20);
-        }
-        return false;
     }
 
     private void RefreshSubtitleClock()
@@ -214,89 +123,13 @@ public partial class MainWindow
         _ = ObserveTaskAsync(_compatibilitySubtitleRestoreTask);
     }
 
-    private async Task RestoreCompatibilitySubtitlesAsync(SubtitleSession session, long generation)
-    {
-        var media = _currentMedia;
-        bool Current() => !_isClosing && generation == Interlocked.Read(ref _playbackGeneration) &&
-            _windowsPlayer is null && media is not null && ReferenceEquals(media, _currentMedia);
-
-        try
-        {
-            var selectedId = -1;
-            if (session.SelectedEmbeddedOrdinal is >= 0)
-            {
-                var inventoryClock = Stopwatch.StartNew();
-                while (Current())
-                {
-                    var embedded = CanReadPlayer ? _mediaPlayer.SpuDescription.Where(option => option.Id >= 0).ToArray() : [];
-                    if (embedded.Length > session.SelectedEmbeddedOrdinal.Value)
-                    {
-                        selectedId = embedded[session.SelectedEmbeddedOrdinal.Value].Id;
-                        break;
-                    }
-                    if (inventoryClock.Elapsed >= TimeSpan.FromSeconds(5)) throw new TimeoutException("The embedded subtitle track was not discovered.");
-                    await Task.Delay(20);
-                }
-            }
-            foreach (var track in session.Tracks)
-            {
-                if (!Current()) return;
-                var previousIds = _mediaPlayer.SpuDescription.Where(option => option.Id >= 0).Select(option => option.Id).ToHashSet();
-                var added = false;
-                await _playbackOperations.Enqueue(() =>
-                {
-                    if (Current()) added = _mediaPlayer.AddSlave(MediaSlaveType.Subtitle, new Uri(track.Path).AbsoluteUri, false);
-                });
-                if (!Current()) return;
-                if (!added)
-                    throw new InvalidOperationException("The compatibility player could not restore an external subtitle.");
-
-                // AddSlave queues an input asynchronously. Its 'select' flag can lose
-                // to automatic selection, so associate the new ID before selecting it.
-                int? addedId = null;
-                var clock = Stopwatch.StartNew();
-                while (Current() && clock.Elapsed < TimeSpan.FromSeconds(5))
-                {
-                    if (CanReadPlayer)
-                    {
-                        var ids = _mediaPlayer.SpuDescription.Where(option => option.Id >= 0 && !previousIds.Contains(option.Id)).ToArray();
-                        if (ids.Length > 1) throw new InvalidOperationException("The restored subtitle track could not be identified.");
-                        if (ids.Length == 1) { addedId = ids[0].Id; break; }
-                    }
-                    await Task.Delay(20);
-                }
-                if (!Current()) return;
-                if (addedId is null) throw new TimeoutException("The compatibility player did not discover the restored subtitle.");
-                _compatibilityPlainSubtitles[addedId.Value] = track;
-                if (string.Equals(track.Path, session.SelectedPath, StringComparison.OrdinalIgnoreCase)) selectedId = addedId.Value;
-            }
-
-            await _playbackOperations.Enqueue(() =>
-            {
-                if (Current() && _mediaPlayer.Spu != selectedId && !_mediaPlayer.SetSpu(selectedId))
-                    throw new InvalidOperationException("The compatibility player could not restore the subtitle selection.");
-            });
-            var selectionClock = Stopwatch.StartNew();
-            while (Current() && (!CanReadPlayer || _mediaPlayer.Spu != selectedId))
-            {
-                if (selectionClock.Elapsed >= TimeSpan.FromSeconds(5)) throw new TimeoutException("The restored subtitle selection did not become active.");
-                await Task.Delay(20);
-            }
-        }
-        finally
-        {
-            if (Current() && ReferenceEquals(_pendingCompatibilitySubtitles, session))
-            {
-                _pendingCompatibilitySubtitles = null;
-                _refreshMetadata = true;
-            }
-        }
-    }
-
     private void ClearSubtitleSession()
     {
         _plainSubtitles.Clear();
         _compatibilityPlainSubtitles.Clear();
+        _compatibilityExternalSubtitlePaths.Clear();
+        _compatibilityAutodetection = true;
+        _compatibilitySubtitleLoadInProgress = false;
         _selectedPlainSubtitle = null;
         _selectedEmbeddedSubtitleOrdinal = null;
         _pendingCompatibilitySubtitles = null;

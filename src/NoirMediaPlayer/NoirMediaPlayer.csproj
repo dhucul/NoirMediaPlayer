@@ -39,10 +39,8 @@
   </ItemGroup>
 
   <!--
-    NOIR ships x64 only. The VideoLAN targets gate the other two runtimes on $(Platform), which
-    is AnyCPU here (Platforms/PlatformTarget do not set it), so without these switches every
-    build and publish also copies the x86 and arm64 runtimes - 182 MB and ~840 files that the
-    installer then discards.
+    NOIR ships x64 only. Keep the other VideoLAN runtimes disabled explicitly,
+    including when restoring an official recovery runtime.
   -->
   <PropertyGroup>
     <VlcWindowsX86Enabled>false</VlcWindowsX86Enabled>
@@ -105,14 +103,14 @@
 
   <Target Name="GenerateLibVlcPluginCache"
           AfterTargets="Build"
-          Condition="'$(OS)' == 'Windows_NT' And Exists('$(TargetDir)libvlc\win-x64\plugins')">
+          Condition="'$(NoirSkipNativeRuntimeChecks)' != 'true' And '$(OS)' == 'Windows_NT' And Exists('$(TargetDir)libvlc\win-x64\plugins')">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(LibVlcRuntimeCheckScript)&quot; -RuntimeDirectory &quot;$(TargetDir)libvlc\win-x64&quot; $(NoirVlcManifestArgument)" />
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(LibVlcPluginCacheScript)&quot; -LibVlcDirectory &quot;$(TargetDir)libvlc\win-x64&quot;" />
   </Target>
 
   <Target Name="GenerateLibVlcPluginCacheOnPublish"
           AfterTargets="Publish"
-          Condition="'$(OS)' == 'Windows_NT' And Exists('$(PublishDir)libvlc\win-x64\plugins')">
+          Condition="'$(NoirSkipNativeRuntimeChecks)' != 'true' And '$(OS)' == 'Windows_NT' And Exists('$(PublishDir)libvlc\win-x64\plugins')">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(LibVlcRuntimeCheckScript)&quot; -RuntimeDirectory &quot;$(PublishDir)libvlc\win-x64&quot; $(NoirVlcManifestArgument)" />
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(LibVlcPluginCacheScript)&quot; -LibVlcDirectory &quot;$(PublishDir)libvlc\win-x64&quot;" />
   </Target>

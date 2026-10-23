@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
+using NoirMediaPlayer.Services;
 
 namespace NoirMediaPlayer.Models;
 
@@ -34,7 +35,7 @@ public sealed class PlaylistItem : INotifyPropertyChanged
     }
 
     public string DurationText => DurationMilliseconds > 0
-        ? TimeSpan.FromMilliseconds(DurationMilliseconds).ToString(DurationMilliseconds >= 3_600_000 ? @"h\:mm\:ss" : @"m\:ss")
+        ? PlaybackTimeFormatter.Format(DurationMilliseconds)
         : "—";
 
     public string KindText => IsDisc ? "DISC" : IsNetwork ? "STREAM" : Path.GetExtension(Source).TrimStart('.').ToUpperInvariant();

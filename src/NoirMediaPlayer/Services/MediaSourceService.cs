@@ -231,7 +231,7 @@ public static class MediaSourceService
         IEnumerable<string> lines;
         try
         {
-            lines = File.ReadLines(playlistPath);
+            lines = PlaylistTextReader.ReadLines(playlistPath, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -253,6 +253,7 @@ public static class MediaSourceService
 
                 rawLine = enumerator.Current;
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception exception)
             {
                 Debug.WriteLine(exception);

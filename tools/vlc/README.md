@@ -20,11 +20,10 @@ output with `VlcRuntimeDirectory`, then update `DefaultRuntime.props` only after
 application and real-disc checks pass. Always use empty build/publish outputs
 when switching engines so obsolete modules cannot survive.
 
-The previous working player, including the resize fix and complete official
-VLC/DVD/AACS runtime, is backed up in
-`artifacts/vlc-runtime-backups/videolan-3.0.23.1-before-custom-default-20261023-045930/player`.
-Launch its `NoirMediaPlayer.exe` directly for recovery; close the other NOIR window
-first. `backup.json` in the parent directory records all 392 file hashes.
+The October 23 build cleanup removed obsolete runnable backups and unselected
+runtime candidates. The selected candidate above and its complete source record
+remain available. Identical historical source archives share one immutable NTFS
+file; each source record retains its own metadata and local patch.
 
 Official-package builds remain available with
 `-p:NoirUseOfficialVlcRuntime=true` on every restore/build/publish command, using a
@@ -156,6 +155,9 @@ These static archives are build inputs, not replacement playback DLLs.
 `RebuildEngine` reuses the configured engine and its compiled dependencies.
 Use `Engine` again after changing the build profile, toolchain, contrib recipes,
 or autotools inputs. Both modes install a complete engine into the private tree.
+The cleanup also removed the intermediate `engine` and `install` directories;
+run `Engine` to recreate them before using `RebuildEngine` again. The toolchain,
+dependency inputs, vendor checkout and selected staged runtime are retained.
 
 The engine profile retains DVD navigation/reading, Blu-ray and BD-J, codecs,
 subtitles and Windows rendering/audio outputs. NOIR supplies its own WPF user
@@ -191,8 +193,7 @@ pre-activation check, including guards for the former default runtime.
 Physical track selection and Blu-ray Java menus are not covered by these results.
 
 The tested custom engine is now the default for the main-folder Release build and
-future builds/publishes. The owned-window resize fix remains in place; the former
-runtime is retained in the runnable backup above. Source edits still require a
+future builds/publishes. The owned-window resize fix remains in place. Source edits still require a
 native rebuild and a newly tested candidate before selecting them. Activation
 results are recorded in `artifacts/vlc-validation/custom-default-verification.json`.
 

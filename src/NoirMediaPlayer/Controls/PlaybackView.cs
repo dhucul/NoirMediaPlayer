@@ -29,6 +29,7 @@ public sealed class PlaybackView : ContentControl
 
     public UIElement? Overlay { get => (UIElement?)GetValue(OverlayProperty); set => SetValue(OverlayProperty, value); }
     public nint WindowHandle => _video.Handle;
+    public void RefreshVideoGeometry() => _video.RequestEmbeddedResize();
 
     public MediaPlayer? MediaPlayer
     {
@@ -209,6 +210,12 @@ public sealed class PlaybackView : ContentControl
         private static readonly uint EmbeddedResizeMessage = RegisterWindowMessage("NOIR.VLC.EmbeddedResize.v1");
         internal event Action? Created;
         internal event Action? Clicked;
+        internal void RequestEmbeddedResize()
+        {
+            if (Handle == 0 || EmbeddedResizeMessage == 0) return;
+            var child = GetWindow(Handle, 5); // GW_CHILD: VLC's event-thread window, when present.
+            if (child != 0) PostMessage(child, EmbeddedResizeMessage, Handle, 0);
+        }
         protected override HandleRef BuildWindowCore(HandleRef parent)
         {
             var handle = CreateWindowEx(0, "STATIC", "NOIR video", 0x56000004, 0, 0, 1, 1, parent.Handle, 0, 0, 0);
@@ -220,11 +227,7 @@ public sealed class PlaybackView : ContentControl
         protected override void DestroyWindowCore(HandleRef window) => DestroyWindow(window.Handle);
         protected override nint WndProc(nint window, int message, nint wParam, nint lParam, ref bool handled)
         {
-            if (message == 0x0047 && EmbeddedResizeMessage != 0) // WM_WINDOWPOSCHANGED
-            {
-                var child = GetWindow(window, 5); // GW_CHILD: VLC's event-thread window, when present.
-                if (child != 0) PostMessage(child, EmbeddedResizeMessage, window, 0);
-            }
+            if (message == 0x0047) RequestEmbeddedResize(); // WM_WINDOWPOSCHANGED
             if (message == 0x0201) Clicked?.Invoke();
             if (WindowsSoftwareVideoSurface.TryPaint(window, message, wParam))
             {

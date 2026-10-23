@@ -106,7 +106,7 @@ Unsupported embedded captions, complex external subtitle rendering, and unmigrat
 
 VLC, the LibVLCSharp wrapper and AACS are retained dependencies. DVD and Blu-ray playback in the main player use the working VLC/AACS backend. The native disc replacement effort has stopped; the separate experimental readers and preview remain available as development code. Existing Windows playback for supported ordinary files remains enabled. The detailed migration inventory below records that work and its limitations, rather than a scheduled disc rewrite.
 
-VLC updates ship with NOIR releases. Normal builds and publishes now select our tested custom VLC engine through `tools/vlc/DefaultRuntime.props`, retaining DVD, Blu-ray and AACS support. The previous runtime remains available in a runnable backup. Build and publish validate the disc components and regenerate the plug-in cache. A separate VLC desktop installation does not update NOIR's bundled engine.
+VLC updates ship with NOIR releases. Normal builds and publishes select our tested custom VLC engine through `tools/vlc/DefaultRuntime.props`, retaining DVD, Blu-ray and AACS support. Build and publish validate the disc components and regenerate the plug-in cache. A separate VLC desktop installation does not update NOIR's bundled engine.
 
 The completion target is common video/audio playback plus DVD and Blu-ray video. Rare formats, unusual stream protocols, and obscure subtitle/layout variants are no longer migration milestones. Existing compatibility support remains available for them; expanding their native support will not hold up the main work.
 
@@ -270,6 +270,12 @@ Requirements:
 
 - Windows 10 or later, x64
 - .NET 10 SDK (`10.0.400` or a compatible newer feature band)
+
+The solution builds Release Windows x64 only. Individual projects default to
+Release/x64, and non-x64 platforms or runtime identifiers fail the build. The
+current application is `src\NoirMediaPlayer\bin\x64\Release\net10.0-windows\win-x64\NoirMediaPlayer.exe`.
+Obsolete platform outputs, publish copies and runtime backups have been removed;
+the selected immutable runtime, source records and native toolchain are retained.
 
 ```powershell
 dotnet restore .\NoirMediaPlayer.slnx

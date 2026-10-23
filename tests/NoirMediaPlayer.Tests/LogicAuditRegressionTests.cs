@@ -638,14 +638,14 @@ public sealed partial class LogicAuditRegressionTests
         Assert.NotNull(Field<Media?>(window, "_currentMedia"));
     });
 
-    private static void ShowPlaybackWindow(MainWindow window)
+    private static void ShowPlaybackWindow(MainWindow window, bool visible = false)
     {
         // Exercise the real HWND renderer without startup imports or changes to user AACS files.
         var loaded = (RoutedEventHandler)Delegate.CreateDelegate(typeof(RoutedEventHandler), window,
             typeof(MainWindow).GetMethod("Window_Loaded", BindingFlags.Instance | BindingFlags.NonPublic)!);
         window.Loaded -= loaded;
         window.WindowStartupLocation = WindowStartupLocation.Manual;
-        window.Left = window.Top = -10000;
+        window.Left = window.Top = visible ? 40 : -10000;
         window.ShowActivated = false;
         window.Show();
         Field<DispatcherTimer>(window, "_uiTimer").Start();
@@ -749,8 +749,18 @@ public sealed partial class LogicAuditRegressionTests
                 Core.Initialize(Path.Combine(AppContext.BaseDirectory, "libvlc", "win-x64"));
                 var app = new App();
                 app.InitializeComponent();
+                // Tests create their own isolated window. A queued Application
+                // startup must not create a second window from StartupUri.
+                // StartupUri's public setter rejects null after XAML assigns it.
+                typeof(Application).GetField("_startupUri", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .SetValue(app, null);
                 app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
-                ready.SetResult(Dispatcher.CurrentDispatcher);
+                // Prevent OnStartup from loading a second engine or user settings
+                // before WithWindow supplies its isolated playback engine.
+                typeof(StartupPrewarm).GetField("_engineTask", BindingFlags.Static | BindingFlags.NonPublic)!
+                    .SetValue(null, new TaskCompletionSource<PlaybackEngine>().Task);
+                Dispatcher.CurrentDispatcher.BeginInvoke(() => ready.TrySetResult(Dispatcher.CurrentDispatcher),
+                    DispatcherPriority.ApplicationIdle);
                 Dispatcher.Run();
             }
             catch (Exception exception) { ready.TrySetException(exception); }
@@ -760,7 +770,8 @@ public sealed partial class LogicAuditRegressionTests
         return ready.Task;
     });
 
-    private static async Task WithWindow(Func<MainWindow, Task> test, bool hardwareDecoding = true, bool realCompatibilityVideo = false)
+    private static async Task WithWindow(Func<MainWindow, Task> test, bool hardwareDecoding = true, bool realCompatibilityVideo = false,
+        int testTimeoutSeconds = 20, bool autoCompatibilityVideo = false)
     {
         var dispatcher = await Ui.Value.WaitAsync(TimeSpan.FromSeconds(10));
         await dispatcher.InvokeAsync(async () =>
@@ -772,7 +783,8 @@ public sealed partial class LogicAuditRegressionTests
             prewarm.GetField("_settings", BindingFlags.Static | BindingFlags.NonPublic)!.SetValue(null, settings);
             prewarm.GetField("_settingsService", BindingFlags.Static | BindingFlags.NonPublic)!
                 .SetValue(null, new SettingsService(Path.Combine(root, "settings.json")));
-            var options = new List<string> { "--aout=dummy", realCompatibilityVideo ? "--vout=direct3d11" : "--vout=dummy", "--quiet" };
+            var options = new List<string> { "--aout=dummy", "--quiet" };
+            if (!autoCompatibilityVideo) options.Add(realCompatibilityVideo ? "--vout=direct3d11" : "--vout=dummy");
             if (!hardwareDecoding) options.Add("--avcodec-hw=none");
             var lib = new LibVLC(options.ToArray());
             prewarm.GetField("_engineTask", BindingFlags.Static | BindingFlags.NonPublic)!
@@ -800,7 +812,7 @@ public sealed partial class LogicAuditRegressionTests
                 Assert.StartsWith("NoirAuditTests-", Path.GetFileName(resolvedRoot));
                 Directory.Delete(resolvedRoot, recursive: true);
             }
-        }).Task.Unwrap().WaitAsync(TimeSpan.FromSeconds(20));
+        }).Task.Unwrap().WaitAsync(TimeSpan.FromSeconds(testTimeoutSeconds));
     }
 
     private static string TestRoot(MainWindow window) => Field<PlayerSettings>(window, "_settings").SnapshotFolder;

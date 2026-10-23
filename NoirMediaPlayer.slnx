@@ -1,5 +1,6 @@
 <Solution>
   <Configurations>
+    <BuildType Name="Release" />
     <Platform Name="x64" />
   </Configurations>
   <Folder Name="/src/">
@@ -8,6 +9,9 @@
     </Project>
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/NoirMediaPlayer.LogicTests/NoirMediaPlayer.LogicTests.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
     <Project Path="tests/NoirMediaPlayer.Tests/NoirMediaPlayer.Tests.csproj">
       <Platform Solution="*|x64" Project="x64" />
     </Project>
