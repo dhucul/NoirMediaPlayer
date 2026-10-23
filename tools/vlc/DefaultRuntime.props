@@ -1,0 +1,11 @@
+<Project>
+  <PropertyGroup>
+    <!-- Promote only a complete candidate that has passed application and disc tests.
+         Keep this path immutable; a later engine fix gets its own staged candidate. -->
+    <NoirDefaultVlcBuildId>noir-vlc-20261023-040217</NoirDefaultVlcBuildId>
+    <NoirDefaultVlcRuntimeDirectory>$(MSBuildThisFileDirectory)..\..\artifacts\vlc-candidates\noir-vlc-3.0.23-20261023-event-resize</NoirDefaultVlcRuntimeDirectory>
+    <!-- An explicit candidate still overrides the default. The official packages
+         remain available for recovery with -p:NoirUseOfficialVlcRuntime=true. -->
+    <VlcRuntimeDirectory Condition="'$(VlcRuntimeDirectory)' == '' And '$(NoirUseOfficialVlcRuntime)' != 'true'">$(NoirDefaultVlcRuntimeDirectory)</VlcRuntimeDirectory>
+  </PropertyGroup>
+</Project>

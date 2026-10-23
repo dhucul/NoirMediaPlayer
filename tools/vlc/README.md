@@ -8,11 +8,29 @@ VLC engine changes use its native source/build system; they are separate from th
 
 ## Standard releases
 
-`VlcRuntimeVersion` in `src/NoirMediaPlayer/NoirMediaPlayer.csproj` selects both
-official VideoLAN NuGet packages. Change that property once for an engine upgrade.
-The base package supplies the runtime; only DVD navigation/reading modules are
-taken from its matching GPL package. LibVLCSharp is versioned separately and must
-support the selected VLC ABI. The current supported engine family is VLC 3.
+Normal builds and publishes select the tested custom engine through
+[`DefaultRuntime.props`](DefaultRuntime.props). The selected immutable candidate is
+`artifacts/vlc-candidates/noir-vlc-3.0.23-20261023-event-resize`, build
+`noir-vlc-20261023-040217`. No command-line override is required. A missing candidate
+fails the build; it does not silently select another runtime. LibVLCSharp is
+versioned separately and must support the selected VLC 3 ABI.
+
+For a later engine fix, build and stage a new candidate, test it in an isolated
+output with `VlcRuntimeDirectory`, then update `DefaultRuntime.props` only after
+application and real-disc checks pass. Always use empty build/publish outputs
+when switching engines so obsolete modules cannot survive.
+
+The previous working player, including the resize fix and complete official
+VLC/DVD/AACS runtime, is backed up in
+`artifacts/vlc-runtime-backups/videolan-3.0.23.1-before-custom-default-20261023-045930/player`.
+Launch its `NoirMediaPlayer.exe` directly for recovery; close the other NOIR window
+first. `backup.json` in the parent directory records all 392 file hashes.
+
+Official-package builds remain available with
+`-p:NoirUseOfficialVlcRuntime=true` on every restore/build/publish command, using a
+fresh output directory. `VlcRuntimeVersion` in the application project pins both
+official packages to 3.0.23.1; DVD modules come from the matching GPL package.
+An explicit `VlcRuntimeDirectory` takes precedence over either default.
 
 Restore, build and test before publishing to an empty directory. Both build and
 publish check the architecture and versions of the core/disc modules, check AACS
@@ -151,40 +169,12 @@ Our image-writer patch preserves snapshots when stream output is disabled;
 it creates the same encoder object without calling the disabled stream-output
 helper. The existing paused MPEG snapshot regression cases cover that behavior.
 
-The full `Engine` build and install have passed on this PC, producing the core
-DLLs and 303 plug-ins. The isolated candidate has decoded the real Blu-ray in G:
-with H.264 video and DTS audio, including pause, seeking and continued playback.
-The updated candidate has also decoded the real DVD in G: with MPEG-2 video and
-AC-3 audio. Synthetic common-format/control checks and all 88 selected NOIR
-regressions pass, including the snapshot cases that failed before our native
-image-writer fix. The user confirmed DVD picture, sound, menus and functional
-resizing in the custom-engine player, with uneven live resizing reported.
-The user clarified that the original player has the same resize lag during DVD
-and Blu-ray playback; only an empty window resized smoothly. Both VLC runtimes
-showed that behavior in the same interface. Fewer overlay moves did not predict
-smoothness. The experimental control replacements were discarded, preserving
-the established first-party Windows/VLC host and the complete custom engine.
-The isolated `noir-vlc-3.0.23-20261023-event-resize` candidate adds
-`0003-asynchronous-embedded-resize.patch` and matching `PlaybackView` host
-notifications. VLC applies the latest parent/picture bounds on its own window
-thread, independently of frame management, and updates DVD mouse coordinates
-with that placement. The same application measured native geometry convergence
-of 38–46 ms with the preceding engine and 5–8 ms with this patch, across playing,
-paused, hardware and software cases. All 102 application checks passed with the
-candidate. Its separate publication is `artifacts/vlc-validation/publish-event-resize`;
-`event-resize-verification.json` records validation and remaining user checks.
-The user clarified that the actual issue was continuous whole-window redraw
-flicker, which this native timing change did not resolve. It remains an isolated
-candidate. The successful interface fix places the native video host in a
-separate, non-activating owned window, keeping GPU video redraws out of the
-custom-chrome interface window. The user confirmed flicker-free DVD and Blu-ray
-resizing, with working DVD menu clicks and the unchanged current VLC/AACS runtime.
-All 103 application checks pass; the main-folder Release x64 build matches the
-tested application and all 375 existing runtime files remain unchanged. No native engine
-replacement is needed for that fix. The WindowChrome preservation experiment and
-ineffective instance-level renderer override were reverted; a diagnostic that
-disabled the Direct3D11 module was confined to a private publication and stopped
-after it became unresponsive.
+The selected engine includes `0003-asynchronous-embedded-resize.patch` and
+matching `PlaybackView` host notifications. VLC applies parent/picture bounds on
+its own window thread and updates DVD mouse coordinates with that placement.
+The application also hosts the video surface in a separate, non-activating owned
+window. This interface change resolves whole-window redraw flicker during video
+resizing; the native placement patch alone did not resolve it.
 
 The complete custom engine has now also passed with the owned-window resize fix.
 The isolated application is
@@ -196,14 +186,15 @@ DVD decoding, and real H.264/DTS Blu-ray decoding passed; Blu-ray pause, seeking
 resume and continued output also passed. The user confirmed DVD picture, sound,
 menu clicks and flicker-free resizing, and Blu-ray picture, sound and flicker-free
 resizing. `custom-owned-video-verification.json` records the checks and packaged
-file hashes; `Verify-CustomOwnedVideo.ps1` repeats the verification. The selected
-main application and all 375 current runtime files remain unchanged. This test
-does not activate the custom engine or install a release.
+file hashes before activation. `Verify-CustomOwnedVideo.ps1` is a historical
+pre-activation check, including guards for the former default runtime.
 Physical track selection and Blu-ray Java menus are not covered by these results.
 
-The regular NOIR build continues to use the tested NuGet runtime. Editing or
-building source changes playback only when a complete custom engine is packaged
-with `VlcRuntimeDirectory` and verified.
+The tested custom engine is now the default for the main-folder Release build and
+future builds/publishes. The owned-window resize fix remains in place; the former
+runtime is retained in the runnable backup above. Source edits still require a
+native rebuild and a newly tested candidate before selecting them. Activation
+results are recorded in `artifacts/vlc-validation/custom-default-verification.json`.
 
 ## Packaging a custom engine
 
@@ -267,7 +258,7 @@ $testOutput = Join-Path (Get-Location) 'artifacts/vlc-custom-bin/'
 dotnet build tests/NoirMediaPlayer.Tests -c Release -p:Platform=x64 "-p:VlcRuntimeDirectory=$runtime" "-p:BaseOutputPath=$testOutput"
 dotnet test tests/NoirMediaPlayer.Tests -c Release --no-build --no-restore -p:Platform=x64 "-p:VlcRuntimeDirectory=$runtime" "-p:BaseOutputPath=$testOutput" --filter FullyQualifiedName~DvdCompatibilityRuntimeTests
 dotnet publish src/NoirMediaPlayer -c Release -r win-x64 --self-contained false -p:Platform=x64 "-p:VlcRuntimeDirectory=$runtime" "-p:BaseOutputPath=$testOutput" -o artifacts/publish/custom-vlc
-# Restore the standard package selection after testing the isolated build.
+# Restore the selected default after testing the isolated candidate.
 dotnet restore tests/NoirMediaPlayer.Tests -p:Platform=x64
 ```
 
@@ -276,7 +267,8 @@ runtime as a unit, rebuilds its cache, and packages the manifest/notices. Bundle
 AACS DLLs remain the fallback if the custom runtime omits them; supplied custom
 AACS DLLs take precedence. AACS key configuration remains unchanged. Use a fresh
 build/publish output for a different engine; restore without the property to return
-to the standard packages. Never stage the custom input inside a build output.
+to the selected custom default. Use `NoirUseOfficialVlcRuntime=true` to select the
+official recovery packages instead. Never stage custom input inside a build output.
 
 The disc runtime tests load DVD/Blu-ray modules and AACS dependencies without
 opening a drive. Run ordinary playback/handoff tests too. Confirm picture, sound,

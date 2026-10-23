@@ -1,9 +1,15 @@
 #define AppName "NOIR Media Player"
-#define AppVersion "1.0.6"
+#define AppVersion "1.0.7"
 #define AppPublisher "NOIR"
 #define AppExeName "NoirMediaPlayer.exe"
 #ifndef PublishDir
   #define PublishDir "..\..\artifacts\publish\win-x64"
+#endif
+#if !FileExists(PublishDir + "\\" + AppExeName)
+  #error "Publish NOIR before compiling the installer, and pass /DPublishDir=<fresh publish directory>."
+#endif
+#if GetFileVersion(PublishDir + "\\" + AppExeName) != AppVersion + ".0"
+  #error "Published NOIR version does not match the installer. Publish the current release into a fresh directory."
 #endif
 
 [Setup]
@@ -42,9 +48,10 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "libvlc\win-arm64\*,libvlc\win-x86\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
-; Plug-ins removed upstream must not survive an in-place VLC upgrade. NOIR is
-; closed by Setup before this runtime-only directory is replaced.
-Type: filesandordirs; Name: "{app}\libvlc\win-x64\plugins"
+; Replace the complete VLC runtime as a unit so older modules and data cannot
+; survive an upgrade. Setup closes NOIR first; settings and AACS keys live outside
+; this runtime directory. The previous tested runtime is backed up separately.
+Type: filesandordirs; Name: "{app}\libvlc\win-x64"
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
