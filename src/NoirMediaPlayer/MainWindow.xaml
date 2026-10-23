@@ -169,58 +169,6 @@
                             <ListBox x:Name="PlaylistView" SelectionChanged="PlaylistView_SelectionChanged"
                                      MouseDoubleClick="PlaylistView_MouseDoubleClick"
                                      ScrollViewer.VerticalScrollBarVisibility="Auto">
-                                <ListBox.Resources>
-                                    <Style TargetType="ScrollBar">
-                                        <Setter Property="Width" Value="10" />
-                                        <Setter Property="Margin" Value="4,2,0,2" />
-                                        <Setter Property="Background" Value="#FF080A0D" />
-                                        <Setter Property="Template">
-                                            <Setter.Value>
-                                                <ControlTemplate TargetType="ScrollBar">
-                                                    <Border Background="{TemplateBinding Background}" CornerRadius="5">
-                                                        <Track x:Name="PART_Track" IsDirectionReversed="True"
-                                                               Orientation="{TemplateBinding Orientation}"
-                                                               Minimum="{TemplateBinding Minimum}"
-                                                               Maximum="{TemplateBinding Maximum}"
-                                                               Value="{TemplateBinding Value}"
-                                                               ViewportSize="{TemplateBinding ViewportSize}">
-                                                            <Track.DecreaseRepeatButton>
-                                                                <RepeatButton Command="{x:Static ScrollBar.PageUpCommand}"
-                                                                              Background="Transparent" BorderThickness="0"
-                                                                              Focusable="False" />
-                                                            </Track.DecreaseRepeatButton>
-                                                            <Track.Thumb>
-                                                                <Thumb Background="#FF424A56" MinHeight="32">
-                                                                    <Thumb.Template>
-                                                                        <ControlTemplate TargetType="Thumb">
-                                                                            <Border x:Name="ThumbChrome"
-                                                                                    Margin="2,0"
-                                                                                    Background="{TemplateBinding Background}"
-                                                                                    CornerRadius="3" />
-                                                                            <ControlTemplate.Triggers>
-                                                                                <Trigger Property="IsMouseOver" Value="True">
-                                                                                    <Setter TargetName="ThumbChrome" Property="Background" Value="#FF697381" />
-                                                                                </Trigger>
-                                                                                <Trigger Property="IsDragging" Value="True">
-                                                                                    <Setter TargetName="ThumbChrome" Property="Background" Value="{StaticResource AccentBrush}" />
-                                                                                </Trigger>
-                                                                            </ControlTemplate.Triggers>
-                                                                        </ControlTemplate>
-                                                                    </Thumb.Template>
-                                                                </Thumb>
-                                                            </Track.Thumb>
-                                                            <Track.IncreaseRepeatButton>
-                                                                <RepeatButton Command="{x:Static ScrollBar.PageDownCommand}"
-                                                                              Background="Transparent" BorderThickness="0"
-                                                                              Focusable="False" />
-                                                            </Track.IncreaseRepeatButton>
-                                                        </Track>
-                                                    </Border>
-                                                </ControlTemplate>
-                                            </Setter.Value>
-                                        </Setter>
-                                    </Style>
-                                </ListBox.Resources>
                                 <ListBox.ItemTemplate>
                                     <DataTemplate DataType="{x:Type models:PlaylistItem}">
                                         <Grid>
@@ -290,7 +238,7 @@
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
-                    <Border Grid.Row="0" Margin="12,12,12,0" Background="#FF000000" CornerRadius="10" ClipToBounds="True"
+                    <Border x:Name="VideoFrame" Grid.Row="0" Margin="12,12,12,0" Background="#FF000000" CornerRadius="10" ClipToBounds="True"
                             BorderBrush="#FF171A20" BorderThickness="1">
                         <controls:PlaybackView x:Name="VideoView" Background="#FF000000" SizeChanged="VideoView_SizeChanged">
                             <Grid x:Name="VideoOverlay" Background="#FF000000" IsHitTestVisible="False">
@@ -465,6 +413,16 @@
                             <Border BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="0,16,0,0" Margin="0,16,0,0">
                                 <StackPanel>
                                     <TextBlock Text="VIEW" Style="{StaticResource SectionLabel}" Margin="0,0,0,10" />
+                                    <TextBlock Text="Video size" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,0,0,4" />
+                                    <ComboBox x:Name="VideoSizeComboBox" SelectedIndex="1" SelectionChanged="VideoSize_SelectionChanged"
+                                              ToolTip="Resize the video and window while preserving the selected aspect ratio.">
+                                        <ComboBoxItem Content="Half size (50%)" Tag="0.5" />
+                                        <ComboBoxItem Content="Original size (100%)" Tag="1" />
+                                        <ComboBoxItem Content="Double size (200%)" Tag="2" />
+                                    </ComboBox>
+                                    <TextBlock Text="Large videos are scaled down to fit your screen."
+                                               Foreground="{StaticResource MutedTextBrush}" FontSize="10"
+                                               TextWrapping="Wrap" Margin="0,5,0,11" />
                                     <TextBlock Text="Aspect ratio" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,0,0,4" />
                                     <ComboBox x:Name="AspectRatioComboBox" SelectedIndex="0" SelectionChanged="AspectRatio_SelectionChanged">
                                         <ComboBoxItem Content="Original" Tag=""

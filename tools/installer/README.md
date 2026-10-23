@@ -1,20 +1,24 @@
 # Building the NOIR installer
 
-The 1.0.8 x64 installer includes the playback-state fixes and isolated snapshot
-decoder. It packages the custom VLC engine selected by
-[`DefaultRuntime.props`](../vlc/DefaultRuntime.props), the owned-window resize
-fix, DVD navigation, Blu-ray support and the retained AACS libraries. It includes
-the .NET 10 Windows desktop runtime, so a separate .NET installation is not needed.
+The 1.0.9 x64 installer adds native video sizing, half/original/double size choices,
+and a shared dark scrollbar theme. It also preserves mini-player dimensions when
+media changes and manual window dimensions during playback backend switches.
+
+It packages the custom VLC engine selected by
+[`DefaultRuntime.props`](../vlc/DefaultRuntime.props), DVD navigation, Blu-ray
+support, AACS libraries, and the .NET 10 Windows desktop runtime. A separate .NET
+installation is not needed.
 
 Publish into a fresh directory and pass that exact directory to Inno Setup. The
 installer checks the published application's version before compiling. Keep the
-application project, `app.manifest` and installer version in step for later releases.
+application project, `app.manifest`, and installer version in step for later releases.
 
 From the main repository folder:
 
 ```powershell
 $releaseOutput = Join-Path $PWD ('artifacts/publish/installer-' + (Get-Date -Format yyyyMMdd-HHmmss))
 $buildOutput = Join-Path $PWD ('artifacts/installer-build/' + (Get-Date -Format yyyyMMdd-HHmmss) + '/')
+
 dotnet publish src/NoirMediaPlayer -c Release -r win-x64 --self-contained true -p:Platform=x64 -p:UseSharedCompilation=false -m:1 -nr:false "-p:BaseOutputPath=$buildOutput" -o $releaseOutput
 if ($LASTEXITCODE -ne 0) { throw 'Publish failed.' }
 $innoCompiler = Join-Path $env:ProgramFiles 'Inno Setup 7/ISCC.exe'
@@ -23,30 +27,23 @@ if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
 ```
 
 This release uses the installed Inno Setup 7 compiler (engine version 7.1.0).
-Adjust `$innoCompiler` if Inno Setup is installed elsewhere. The older private
-6.7.3 compiler and its provenance record belong to the 1.0.7 build.
+Adjust `$innoCompiler` if Inno Setup is installed elsewhere.
 
-The result is `Installer/NOIR-Media-Player-Setup-1.0.8-x64.exe`. Setup retains the
-existing application identity and shortcuts. During an upgrade it closes NOIR and
-replaces the entire bundled VLC runtime directory, preventing stale modules or
-data from being mixed with the new engine. User settings and the AACS key database
-remain outside that directory.
+The result is `Installer/NOIR-Media-Player-Setup-1.0.9-x64.exe`, with an adjacent
+`.sha256` checksum file. Setup retains the existing application identity and
+shortcuts. During an upgrade it closes NOIR and replaces the entire bundled VLC
+runtime directory, preventing stale modules or data from being mixed with the
+new engine. User settings and the AACS key database remain outside that directory.
 
-The 1.0.8 verification record is
-`artifacts/installer-validation/1.0.8/verification.json`. Validation is bounded:
-managed regressions, package/version/runtime checks, and a single short,
-low-resolution software snapshot through the packaged worker. No broad playback
-suite or GPU stress test is part of this rebuild, and Setup is not installed on
-the development machine as part of verification.
+The 1.0.9 verification record is
+`artifacts/installer-validation/1.0.9/verification.json`. Validation covers 107
+managed tests and 11 sizing, theme, and video-host tests, installer payload
+extraction and SHA-256 comparison against the publish output, version and runtime
+checks, and one bounded software snapshot through the extracted application.
+Inno Setup compilation completed without warnings. Validation does not install
+Setup on the development machine or run a broad playback/disc or GPU stress suite.
 
-The completed installer was extracted without running Setup: all 1,193 payload
-files matched the publish output by SHA-256, and all 781 native payload files
-matched the previously tested candidate. All 107 managed tests passed. The final
-extracted application passed the two-second, 160×96 snapshot smoke test with no
-leftover worker or staging files. Inno Setup compilation completed without warnings.
-The installer has an adjacent `.sha256` checksum file.
-
-Historical 1.0.7 validation, including its 103 playback and host regressions, is
-recorded separately in `artifacts/vlc-validation/installer-1.0.7-verification.json`
-and `artifacts/vlc-validation/Verify-Installer107.ps1`. Those results are not new
-1.0.8 test runs.
+Historical 1.0.8 results remain in
+`artifacts/installer-validation/1.0.8/verification.json`. Historical 1.0.7 results
+remain in `artifacts/vlc-validation/installer-1.0.7-verification.json`. They are
+separate from the 1.0.9 test runs.

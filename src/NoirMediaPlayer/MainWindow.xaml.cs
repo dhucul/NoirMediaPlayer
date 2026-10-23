@@ -1327,6 +1327,7 @@ public partial class MainWindow : Window
         var release = ReleaseCurrentMedia();
         _replaySubtitles.ClearIfDifferent(item);
         var generation = Interlocked.Read(ref _playbackGeneration);
+        ResetVideoSizing(preserveWindowSize: forceVlc && ReferenceEquals(_currentItem, item));
         _currentItem = item;
         _currentIndex = _playlist.IndexOf(item);
         PlaylistView.SelectedItem = item;
@@ -1891,6 +1892,7 @@ public partial class MainWindow : Window
             if (hasSize && width > 0)
             {
                 ResolutionBadge.Text = $"{width}×{height}";
+                SizeWindowToVideo(width, height);
             }
             else if (_currentItem is not null && IsAudioFile(_currentItem.Source))
             {
@@ -2173,6 +2175,7 @@ public partial class MainWindow : Window
         {
             if (_windowsPlayer is not null) UpdateNativeSubtitles(PlaybackTime);
             else if (_currentMedia is not null) VideoView.RefreshVideoGeometry();
+            RefreshVideoInfo();
             ShowNotice($"Aspect ratio · {item.Content}");
         }
     }
@@ -2195,6 +2198,7 @@ public partial class MainWindow : Window
         }
         else if (_currentMedia is not null && !await RestartCompatibilityPresentationAsync(item)) return;
         if (_isClosing || !ReferenceEquals(item, _currentItem)) return;
+        RefreshVideoInfo();
         ShowNotice(_rotation == 0 ? "Rotation reset" : $"Rotated {_rotation}°");
     }
 
@@ -2482,6 +2486,7 @@ public partial class MainWindow : Window
 
     private void ResetNowPlaying()
     {
+        ResetVideoSizing();
         SetPlaybackState(PlaybackState.Stopped);
         _lastPlaybackTime = 0;
         _lastPlaybackLength = 0;
@@ -2817,6 +2822,7 @@ public partial class MainWindow : Window
 
             var monitorBounds = GetCurrentMonitorBounds();
             _isFullscreen = true;
+            UpdateVideoSizeLimit();
             SetSidebarVisibility(false);
             SetInspectorVisibility(false);
             TitleBarRow.Height = new GridLength(0);
@@ -2832,6 +2838,7 @@ public partial class MainWindow : Window
         else
         {
             _isFullscreen = false;
+            UpdateVideoSizeLimit();
             TitleBarRow.Height = new GridLength(46);
             StatusBarRow.Height = new GridLength(28);
             ResizeMode = ResizeMode.CanResize;
@@ -2851,7 +2858,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private Rect GetCurrentMonitorBounds()
+    private Rect GetCurrentMonitorBounds(bool workArea = false)
     {
         var windowHandle = new WindowInteropHelper(this).Handle;
         var monitorHandle = MonitorFromWindow(windowHandle, MonitorDefaultToNearest);
@@ -2860,12 +2867,13 @@ public partial class MainWindow : Window
         if (monitorHandle == IntPtr.Zero || !GetMonitorInfo(monitorHandle, ref monitorInfo) ||
             PresentationSource.FromVisual(this)?.CompositionTarget is not { } compositionTarget)
         {
-            return new Rect(0, 0, SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight);
+            return workArea ? SystemParameters.WorkArea : new Rect(0, 0, SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight);
         }
 
+        var bounds = workArea ? monitorInfo.WorkArea : monitorInfo.Monitor;
         var transform = compositionTarget.TransformFromDevice;
-        var topLeft = transform.Transform(new Point(monitorInfo.Monitor.Left, monitorInfo.Monitor.Top));
-        var bottomRight = transform.Transform(new Point(monitorInfo.Monitor.Right, monitorInfo.Monitor.Bottom));
+        var topLeft = transform.Transform(new Point(bounds.Left, bounds.Top));
+        var bottomRight = transform.Transform(new Point(bounds.Right, bounds.Bottom));
         return new Rect(topLeft, bottomRight);
     }
 
@@ -3273,6 +3281,7 @@ public partial class MainWindow : Window
 
     private void Window_StateChanged(object sender, EventArgs e)
     {
+        UpdateVideoSizeLimit();
         MaximizeButton.Content = WindowState == WindowState.Maximized ? "\uE923" : "\uE922";
         WindowFrame.BorderThickness = WindowState == WindowState.Maximized || _isFullscreen ? new Thickness(0) : new Thickness(1);
     }
