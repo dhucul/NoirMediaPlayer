@@ -54,6 +54,7 @@ public partial class MainWindow : Window
     private volatile bool _isClosing;
     private bool _isFullscreen;
     private bool _isCompact;
+    private bool? _transportUsesTwoRows;
     private bool _shutdownStarted;
     private bool _shutdownComplete;
     private bool _playbackDisposed;
@@ -379,6 +380,7 @@ public partial class MainWindow : Window
 
         CancelPlaybackStartupWatchdog();
         SetPlaybackState(PlaybackState.Playing);
+        Interlocked.Exchange(ref _compatibilityChapterTime, -1);
         if (_currentItem is not null) _shuffleCycle.MarkPlayed(_currentItem.Source);
         EngineStatusText.Text = "PLAYING";
         EngineStatusDot.Fill = FindBrush("AccentBrush", Brushes.DarkSeaGreen);
@@ -386,8 +388,15 @@ public partial class MainWindow : Window
         StatusDot.Fill = FindBrush("AccentBrush", Brushes.DarkSeaGreen);
         EmptyPlayerPanel.Visibility = Visibility.Collapsed;
         SetVideoSurfaceActive(true);
+        if (_windowsPlayer is not null) UpdateNativeSubtitles(PlaybackTime);
         _refreshMetadata = true;
         _metadataRetries = 12;
+        if (_pauseAfterStart)
+        {
+            var mpegHandoff = _windowsPlayer is null && _currentItem is { IsDisc: false } current && MpegStreamInspection.SupportsExtension(current.Source);
+            if (mpegHandoff) _ = ObserveTaskAsync(PauseMpegCompatibilityAfterFirstPictureAsync(generation));
+            else _ = PlayerCommandAsync(() => _mediaPlayer.SetPause(true), player => player.Pause());
+        }
     }
 
     private void OnPaused(VLCState state)
@@ -401,6 +410,7 @@ public partial class MainWindow : Window
         SetPlaybackState(PlaybackState.Paused);
         EngineStatusText.Text = "PAUSED";
         StatusText.Text = "Paused";
+        _pauseAfterStart = false;
     }
 
     private void OnStopped(VLCState state)
@@ -450,7 +460,9 @@ public partial class MainWindow : Window
         var module = args.Module ?? string.Empty;
         var message = args.Message ?? string.Empty;
         if (!module.Contains("bluray", StringComparison.OrdinalIgnoreCase) &&
+            !module.Contains("dvd", StringComparison.OrdinalIgnoreCase) &&
             !module.Contains("aacs", StringComparison.OrdinalIgnoreCase) &&
+            !message.Contains("dvd", StringComparison.OrdinalIgnoreCase) &&
             !message.Contains("bluray", StringComparison.OrdinalIgnoreCase) &&
             !message.Contains("blu-ray", StringComparison.OrdinalIgnoreCase) &&
             !message.Contains("aacs", StringComparison.OrdinalIgnoreCase) &&
@@ -504,7 +516,7 @@ public partial class MainWindow : Window
     {
         var startupIntent = _playbackIntent;
         _uiTimer.Start();
-        StatusText.Text = "LibVLC ready · Drop media anywhere";
+        StatusText.Text = "Ready · Drop media anywhere";
         Topmost = _settings.AlwaysOnTop;
 
         if (_settingsService.LoadFailed)
@@ -703,6 +715,7 @@ public partial class MainWindow : Window
         RememberPositionCheckBox.IsChecked = _settings.RememberPosition;
         AutoPlayNextCheckBox.IsChecked = _settings.AutoPlayNext;
         HardwareDecodingCheckBox.IsChecked = _settings.HardwareDecoding;
+        WindowsPlaybackCheckBox.IsChecked = _settings.PreferWindowsPlayback;
         AlwaysOnTopCheckBox.IsChecked = _settings.AlwaysOnTop;
         UpdateAacsStatus();
 
@@ -1250,9 +1263,21 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private async Task<bool> PlayItem(PlaylistItem item, bool allowResume = true, long requestedPosition = -1)
+    private Task<bool> PlayItem(PlaylistItem item, bool allowResume = true, long requestedPosition = -1)
+    {
+        _windowsFailureReason = null;
+        return PlayItemCore(item, allowResume, requestedPosition, forceVlc: false, pauseAfterStart: false,
+            requestedSubtitles: ReferenceEquals(_currentItem, item) && _windowsPlayer is not null ? CaptureSubtitleSession() : null);
+    }
+
+    private async Task<bool> PlayItemCore(PlaylistItem item, bool allowResume, long requestedPosition, bool forceVlc, bool pauseAfterStart,
+        int? requestedAudioOrdinal = null, SubtitleSession? requestedSubtitles = null)
     {
         if (_isClosing || _playbackDisposed || !_playlist.Contains(item)) return false;
+        // A validated ASF marker map works on either backend. Retain it before
+        // releasing the native session instead of repeating HTTP inspection at handoff.
+        var retainedAsfChapters = forceVlc && ReferenceEquals(_currentItem, item) && !item.IsDisc
+            ? _compatibilityChapters ?? (_nativeUsesAsfMarkers ? _nativeChapters : null) : null;
         if (_ejectingDriveRoot is not null && DiscService.IsDiscSourceOnDrive(item.Source, _ejectingDriveRoot))
         {
             ShowNotice("Wait for this drive to finish ejecting");
@@ -1303,43 +1328,82 @@ public partial class MainWindow : Window
         StatusText.Text = $"Opening · {item.Title}";
         EngineStatusText.Text = item.IsDisc ? "READING DISC" : item.IsNetwork ? "CONNECTING" : "OPENING";
         EngineStatusDot.Fill = Brushes.Goldenrod;
+        var nativeAttempted = false;
         try
         {
             await release.WaitAsync(PlaybackStartupPolicy.DiscTimeout, _lifetimeCancellation.Token);
             if (!IsCurrentPlayback(generation, item)) return false;
-            var media = CreateMedia(item);
-            _currentMedia = media;
-            if (_rotation != 0)
-            {
-                media.AddOption(":video-filter=transform");
-                media.AddOption($":transform-type={_rotation}");
-            }
+            _pauseAfterStart = pauseAfterStart;
+            _pendingCompatibilityAudioOrdinal = requestedAudioOrdinal;
             _pendingPositionIsExplicit = requestedPosition >= 0;
             _pendingResumePosition = requestedPosition >= 0 ? requestedPosition : 0;
             if (requestedPosition < 0 && allowResume && _settings.RememberPosition &&
                 _settings.ResumePositions.TryGetValue(item.Source, out var savedPosition))
                 _pendingResumePosition = savedPosition;
             _hasPendingPosition = _pendingPositionIsExplicit || _pendingResumePosition >= 10_000;
-            AttachPlaybackEvents(generation);
             _positionPersistClock.Restart();
             ClearDiscEngineLogs();
-            StartPlaybackStartupWatchdog(item, generation);
-            var started = false;
-            var volume = _settings.Volume;
-            var muted = _settings.IsMuted;
-            var rate = _settings.PlaybackRate;
             var ratio = (AspectRatioComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString();
-            await _playbackOperations.Enqueue(() =>
+            var rotation = _rotation;
+            // Discovery and bounded local/HTTP metadata inspection must not block the UI.
+            var plan = forceVlc ? null : await Task.Run(() =>
             {
-                if (_isClosing || generation != Interlocked.Read(ref _playbackGeneration)) return;
-                started = _mediaPlayer.Play(media);
-                _mediaPlayer.Volume = volume;
-                _mediaPlayer.Mute = muted;
-                _mediaPlayer.SetRate(rate);
-                _mediaPlayer.AspectRatio = string.IsNullOrEmpty(ratio) ? null : ratio;
-            }).WaitAsync(_lifetimeCancellation.Token);
+                var candidate = WindowsPlaybackPolicy.CreatePlan(item, _settings, rotation, ratio);
+                return candidate is not null && item.IsNetwork ? WindowsHttpChapters.Inspect(item.Source, candidate) : candidate;
+            });
             if (!IsCurrentPlayback(generation, item)) return false;
-            if (!started) throw new InvalidOperationException("LibVLC rejected the media source.");
+            if (TryGetWindowsPlaybackWindow(plan, out var nativeWindow))
+            {
+                nativeAttempted = true;
+                _nativeChapters = plan!.Chapters;
+                _nativeUsesAsfMarkers = plan.UsesAsfMarkers;
+                // Restore choices before metadata callbacks can select the first
+                // embedded cue. This also preserves subtitles-off on replay.
+                RestoreSubtitleSession(requestedSubtitles ?? (plan!.AutomaticSubtitles.Count > 0
+                    ? new SubtitleSession(plan.AutomaticSubtitles.ToArray(), plan.SelectedSubtitlePath) : null), compatibility: false);
+                await StartWindowsPlaybackAsync(item, nativeWindow, generation, plan.DetectedContentType, rotation, ratio);
+            }
+            else
+            {
+                var compatibilityChapters = retainedAsfChapters ?? (!item.IsDisc && (item.IsNetwork || WindowsAsfChapters.SupportsExtension(item.Source))
+                    ? await Task.Run(() => item.IsNetwork ? WindowsAsfChapters.TryReadHttp(item.Source) : WindowsAsfChapters.TryRead(item.Source)) : null);
+                if (!IsCurrentPlayback(generation, item)) return false;
+                _compatibilityChapters = compatibilityChapters;
+                var media = CreateMedia(item);
+                _currentMedia = media;
+                // Restore the native inventory once, including automatic captions.
+                // Letting VLC rediscover these inputs would duplicate their IDs.
+                if (requestedSubtitles is not null) media.AddOption(":no-sub-autodetect-file");
+                if (requestedSubtitles is { SelectedPath: null } && requestedSubtitles.SelectedEmbeddedOrdinal is null or < 0) media.AddOption(":sub-track=-2");
+                if (requestedSubtitles?.SelectedEmbeddedOrdinal is >= 0) media.AddOption($":sub-track={requestedSubtitles.SelectedEmbeddedOrdinal.Value}");
+                RestoreSubtitleSession(requestedSubtitles, compatibility: true);
+                if (_rotation != 0)
+                {
+                    media.AddOption(":video-filter=transform");
+                    media.AddOption($":transform-type={_rotation}");
+                }
+                EngineStatusText.ToolTip = string.IsNullOrEmpty(_windowsFailureReason)
+                    ? "VLC compatibility playback"
+                    : $"VLC compatibility playback\nWindows playback: {_windowsFailureReason}";
+                AttachPlaybackEvents(generation);
+                StartPlaybackStartupWatchdog(item, generation);
+                var started = false;
+                var volume = _settings.Volume;
+                var muted = _settings.IsMuted;
+                var rate = _settings.PlaybackRate;
+                await _playbackOperations.Enqueue(() =>
+                {
+                    if (_isClosing || generation != Interlocked.Read(ref _playbackGeneration)) return;
+                    started = _mediaPlayer.Play(media);
+                    _mediaPlayer.Volume = volume;
+                    _mediaPlayer.Mute = muted;
+                    _mediaPlayer.SetRate(rate);
+                    _mediaPlayer.AspectRatio = string.IsNullOrEmpty(ratio) ? null : ratio;
+                }).WaitAsync(_lifetimeCancellation.Token);
+                if (IsCurrentPlayback(generation, item) && !started)
+                    throw new InvalidOperationException("LibVLC rejected the media source.");
+            }
+            if (!IsCurrentPlayback(generation, item)) return false;
             _shuffleCycle.MarkPlayed(item.Source);
             AddRecent(item.Source);
             ScheduleSettingsSave();
@@ -1349,6 +1413,12 @@ public partial class MainWindow : Window
         catch (Exception exception)
         {
             Debug.WriteLine(exception);
+            if (nativeAttempted && IsCurrentPlayback(generation, item))
+            {
+                _windowsFailureReason = $"0x{exception.HResult:X8}: {exception.Message}";
+                return await PlayItemCore(item, allowResume, requestedPosition, forceVlc: true, pauseAfterStart,
+                    requestedAudioOrdinal, requestedSubtitles);
+            }
             if (IsCurrentPlayback(generation, item))
             {
                 _ = ReleaseCurrentMedia();
@@ -1387,6 +1457,21 @@ public partial class MainWindow : Window
         CancelPlaybackStartupWatchdog();
         var media = _currentMedia;
         _currentMedia = null;
+        WindowsMediaEngine? windowsPlayer;
+        lock (_windowsSessionSync)
+        {
+            windowsPlayer = _windowsPlayer;
+            _windowsPlayer = null;
+        }
+        _pauseAfterStart = false;
+        _pendingCompatibilityAudioOrdinal = null;
+        _compatibilityAudioRestoreTask = null;
+        _nativeChapters = null;
+        _nativeUsesAsfMarkers = false;
+        _windowsStartupPending = false;
+        _compatibilityChapters = null;
+        Interlocked.Exchange(ref _compatibilityChapterTime, -1);
+        ClearSubtitleSession();
         _pendingResumePosition = 0;
         _hasPendingPosition = false;
         SetPlaybackState(PlaybackState.Stopped);
@@ -1395,8 +1480,12 @@ public partial class MainWindow : Window
         {
             try
             {
-                _mediaPlayer.Stop();
-                _mediaPlayer.Media = null;
+                try { windowsPlayer?.Dispose(); }
+                finally
+                {
+                    _mediaPlayer.Stop();
+                    _mediaPlayer.Media = null;
+                }
             }
             finally { media?.Dispose(); }
         });
@@ -1414,18 +1503,6 @@ public partial class MainWindow : Window
 
     private bool CanReadPlayer => !_isClosing && !_playbackDisposed && _playbackOperations.IsIdle;
 
-    private Task PlayerCommandAsync(Action command)
-    {
-        if (_isClosing || _playbackDisposed) return Task.CompletedTask;
-        var generation = Interlocked.Read(ref _playbackGeneration);
-        var task = _playbackOperations.Enqueue(() =>
-        {
-            if (!_isClosing && generation == Interlocked.Read(ref _playbackGeneration)) command();
-        });
-        _ = ObserveTaskAsync(task);
-        return task;
-    }
-
     private static async Task ObserveTaskAsync(Task task)
     {
         try { await task.ConfigureAwait(false); }
@@ -1436,14 +1513,18 @@ public partial class MainWindow : Window
     {
         if (!_hasPendingPosition || generation != Interlocked.Read(ref _playbackGeneration) ||
             length <= 0 || !CanReadPlayer || _playbackState is not (PlaybackState.Playing or PlaybackState.Paused) ||
-            !_mediaPlayer.IsSeekable) return;
+            !PlaybackIsSeekable) return;
+        // Complete compatibility stream selection and the requested pause before
+        // seeking. Adding captions or changing audio can otherwise reset the clock.
+        if (_windowsPlayer is null && (_pauseAfterStart || _pendingCompatibilitySubtitles is not null ||
+            _pendingCompatibilityAudioOrdinal is not null)) return;
         var resumeAt = PlaybackResumePolicy.Resolve(_pendingResumePosition, length, _pendingPositionIsExplicit);
         _hasPendingPosition = false;
         _pendingResumePosition = 0;
         if (resumeAt is { } position)
         {
             _lastPlaybackTime = position;
-            _ = PlayerCommandAsync(() => _mediaPlayer.Time = position);
+            _ = PlayerCommandAsync(() => RestoreCompatibilityPosition(position), player => player.Time = position);
             ShowNotice($"Resumed at {FormatTime(position)}");
         }
         else if (_currentItem is not null)
@@ -1456,7 +1537,7 @@ public partial class MainWindow : Window
     private void StartPlaybackStartupWatchdog(PlaylistItem item, long generation)
     {
         CancelPlaybackStartupWatchdog();
-        var timeout = PlaybackStartupPolicy.GetTimeout(item.IsNetwork, item.IsDisc);
+        var timeout = _windowsPlayer is not null ? TimeSpan.FromSeconds(10) : PlaybackStartupPolicy.GetTimeout(item.IsNetwork, item.IsDisc);
         if (timeout is null)
         {
             return;
@@ -1491,7 +1572,12 @@ public partial class MainWindow : Window
                     return;
                 }
 
-                if (item.IsDisc)
+                if (_windowsPlayer is not null)
+                {
+                    _windowsFailureReason = "Windows playback did not start within 10 seconds.";
+                    _ = ObserveTaskAsync(SwitchToVlcAsync());
+                }
+                else if (item.IsDisc)
                 {
                     HandleDiscPlaybackFailure(item, timedOut: true);
                 }
@@ -1536,6 +1622,7 @@ public partial class MainWindow : Window
         var isAacsProtected = DiscService.IsAacsProtectedSource(item.Source);
         var aacsStatus = AacsService.CurrentStatus;
         var engineDetail = GetLatestDiscEngineLog();
+        var diagnosticReport = SaveDvdFailureDiagnostic(item, timedOut);
         var failure = PlaybackStartupPolicy.DescribeDiscFailure(
             isAacsProtected,
             aacsStatus.KeyDatabaseFound,
@@ -1554,6 +1641,7 @@ public partial class MainWindow : Window
         var diagnostic = string.IsNullOrWhiteSpace(engineDetail)
             ? string.Empty
             : $"\n\nEngine detail: {engineDetail}";
+        if (diagnosticReport is not null) diagnostic += $"\n\nDiagnostic report: {diagnosticReport}";
         MessageBox.Show(
             this,
             failure.DialogMessage + diagnostic,
@@ -1592,9 +1680,9 @@ public partial class MainWindow : Window
             return;
         }
         if (_playbackState == PlaybackState.Playing)
-            await PlayerCommandAsync(() => _mediaPlayer.SetPause(true));
+            await PlayerCommandAsync(() => _mediaPlayer.SetPause(true), player => player.Pause());
         else if (_playbackState == PlaybackState.Paused)
-            await PlayerCommandAsync(() => _mediaPlayer.SetPause(false));
+            await PlayerCommandAsync(() => _mediaPlayer.SetPause(false), player => player.Play());
         else
         {
             if (_playbackState == PlaybackState.Ended) _shuffleCycle.Reset();
@@ -1626,7 +1714,7 @@ public partial class MainWindow : Window
         ++_playbackIntent;
         if (_lastPlaybackTime > 5_000 && _playbackState is PlaybackState.Playing or PlaybackState.Paused)
         {
-            await PlayerCommandAsync(() => _mediaPlayer.Time = 0);
+            await PlayerCommandAsync(() => SeekCompatibilityTime(0), player => player.Time = 0);
             return;
         }
         if (_playlist.Count == 0) return;
@@ -1706,10 +1794,24 @@ public partial class MainWindow : Window
             return;
         }
 
-        var length = Math.Max(0, _mediaPlayer.Length);
-        var time = Math.Max(0, _mediaPlayer.Time);
+        var length = Math.Max(0, PlaybackLength);
+        var time = Math.Max(0, PlaybackTime);
+        if (_windowsPlayer is { } windowsPlayer && _playbackState is PlaybackState.Playing or PlaybackState.Paused)
+        {
+            try { windowsPlayer.UpdateVideo(); }
+            catch (Exception exception)
+            {
+                Debug.WriteLine(exception);
+                _windowsFailureReason = $"0x{exception.HResult:X8}: {exception.Message}";
+                _ = ObserveTaskAsync(SwitchToVlcAsync());
+                return;
+            }
+        }
         _lastPlaybackLength = length;
         _lastPlaybackTime = time;
+        UpdateNativeSubtitles(time);
+        TryApplyPendingCompatibilityAudio();
+        TryApplyPendingCompatibilitySubtitles();
         TryApplyPendingResume(Interlocked.Read(ref _playbackGeneration), length);
         if (!_isScrubbing && length > 0)
         {
@@ -1751,8 +1853,8 @@ public partial class MainWindow : Window
         long length;
         try
         {
-            time = CanReadPlayer && _currentMedia is not null ? _mediaPlayer.Time : _lastPlaybackTime;
-            length = CanReadPlayer && _currentMedia is not null ? _mediaPlayer.Length : _lastPlaybackLength;
+            time = CanReadPlayer && HasCurrentMedia ? PlaybackTime : _lastPlaybackTime;
+            length = CanReadPlayer && HasCurrentMedia ? PlaybackLength : _lastPlaybackLength;
         }
         catch (Exception exception) when (exception is ObjectDisposedException or VLCException)
         {
@@ -1786,7 +1888,14 @@ public partial class MainWindow : Window
         {
             uint width = 0;
             uint height = 0;
-            if (_mediaPlayer.Size(0, ref width, ref height) && width > 0)
+            var hasSize = false;
+            if (_windowsPlayer is { } windowsPlayer)
+            {
+                (width, height) = windowsPlayer.VideoSize;
+                hasSize = width > 0;
+            }
+            else hasSize = _mediaPlayer.Size(0, ref width, ref height);
+            if (hasSize && width > 0)
             {
                 ResolutionBadge.Text = $"{width}×{height}";
             }
@@ -1819,6 +1928,24 @@ public partial class MainWindow : Window
         _isRefreshingTracks = true;
         try
         {
+            if (_windowsPlayer is { } windowsPlayer)
+            {
+                AudioTrackComboBox.Items.Clear();
+                var tracks = windowsPlayer.AudioTracks;
+                if (tracks.Count > 0)
+                {
+                    AudioTrackComboBox.Items.Add(new ComboBoxItem { Content = "Disable audio", Tag = -1 });
+                    foreach (var track in tracks)
+                    {
+                        var option = new ComboBoxItem { Content = track.Name, Tag = track };
+                        AudioTrackComboBox.Items.Add(option);
+                        if (track.Selected) AudioTrackComboBox.SelectedItem = option;
+                    }
+                    if (AudioTrackComboBox.SelectedItem is null) AudioTrackComboBox.SelectedIndex = 0;
+                }
+                RefreshNativeSubtitleSelector();
+                return;
+            }
             AudioTrackComboBox.Items.Clear();
             foreach (var track in _mediaPlayer.AudioTrackDescription)
             {
@@ -1874,12 +2001,18 @@ public partial class MainWindow : Window
             return;
         }
 
-        var trackId = Convert.ToInt32(item.Tag, CultureInfo.InvariantCulture);
-        _ = PlayerCommandAsync(() => _mediaPlayer.SetAudioTrack(trackId));
+        if (item.Tag is WindowsAudioTrack nativeTrack)
+            _ = PlayerCommandAsync(() => ApplyVlcAudioOrdinal(nativeTrack.Ordinal), player => player.SelectAudioTrack(nativeTrack.Id));
+        else
+        {
+            var trackId = Convert.ToInt32(item.Tag, CultureInfo.InvariantCulture);
+            _ = PlayerCommandAsync(() => _mediaPlayer.SetAudioTrack(trackId),
+                trackId == -1 ? player => player.SelectAudioTrack(-1) : null);
+        }
         ShowNotice($"Audio · {item.Content}");
     }
 
-    private void SubtitleTrack_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void SubtitleTrack_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_isInitializing || _isRefreshingTracks ||
             SubtitleTrackComboBox.SelectedItem is not ComboBoxItem item || item.Tag is null)
@@ -1887,6 +2020,26 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_windowsPlayer is not null)
+        {
+            var captionGeneration = Interlocked.Read(ref _playbackGeneration);
+            _selectedPlainSubtitle = item.Tag as PlainSubtitleTrack;
+            _selectedEmbeddedSubtitleOrdinal = item.Tag is WindowsCaptionTrack embedded ? embedded.Ordinal : -1;
+            // Keep off/selection feedback synchronous with the selector, even
+            // while an in-band stream command is waiting on the worker.
+            RefreshSubtitleClock();
+            if (_selectedPlainSubtitle is null) NativeSubtitlePresenter.SetCue(null);
+            else if (CanReadPlayer) UpdateNativeSubtitles(PlaybackTime);
+            if (item.Tag is WindowsCaptionTrack caption)
+                await PlayerCommandAsync(() => SelectCompatibilityEmbeddedSubtitle(caption.Ordinal), player => player.SelectCaptionTrack(caption.Id));
+            else
+                await PlayerCommandAsync(() => { }, player => player.SelectCaptionTrack(-1));
+            if (_isClosing || captionGeneration != Interlocked.Read(ref _playbackGeneration)) return;
+            RefreshSubtitleClock();
+            if (CanReadPlayer) UpdateNativeSubtitles(PlaybackTime);
+            ShowNotice(_selectedPlainSubtitle is null && _selectedEmbeddedSubtitleOrdinal is not >= 0 ? "Subtitles off" : $"Subtitles · {item.Content}");
+            return;
+        }
         var trackId = Convert.ToInt32(item.Tag, CultureInfo.InvariantCulture);
         _ = PlayerCommandAsync(() => _mediaPlayer.SetSpu(trackId));
         ShowNotice(item.Tag.ToString() == "-1" ? "Subtitles off" : $"Subtitles · {item.Content}");
@@ -1903,7 +2056,7 @@ public partial class MainWindow : Window
         var dialog = new OpenFileDialog
         {
             Title = "Load subtitles",
-            Filter = "Subtitle files|*.srt;*.ass;*.ssa;*.sub;*.vtt;*.idx|All files|*.*",
+            Filter = "Subtitle files|*.srt;*.ass;*.ssa;*.sub;*.vtt;*.webvtt;*.idx|All files|*.*",
             Multiselect = false,
             InitialDirectory = File.Exists(_currentItem.Source) ? Path.GetDirectoryName(_currentItem.Source) : null
         };
@@ -1913,9 +2066,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var location = new Uri(dialog.FileName).AbsoluteUri;
-        var success = false;
-        await PlayerCommandAsync(() => success = _mediaPlayer.AddSlave(MediaSlaveType.Subtitle, location, true));
+        var success = await LoadExternalSubtitleAsync(dialog.FileName);
         if (_isClosing) return;
         ShowNotice(success ? $"Loaded subtitles · {Path.GetFileName(dialog.FileName)}" : "Could not load that subtitle file");
         if (success)
@@ -1937,10 +2088,17 @@ public partial class MainWindow : Window
             Directory.CreateDirectory(_settings.SnapshotFolder);
             var safeTitle = string.Concat(_currentItem.Title.Select(character =>
                 Path.GetInvalidFileNameChars().Contains(character) ? '_' : character));
-            var fileName = $"{safeTitle} {DateTime.Now:yyyy-MM-dd HH-mm-ss}.png";
+            var fileName = $"{safeTitle} {DateTime.Now:yyyy-MM-dd HH-mm-ss-fffffff}.png";
             var path = Path.Combine(_settings.SnapshotFolder, fileName);
             var success = false;
-            await PlayerCommandAsync(() => success = _mediaPlayer.TakeSnapshot(0, path, 0, 0));
+            var subtitles = _selectedPlainSubtitle;
+            var source = _currentItem.Source;
+            var originalPresentation = !_currentItem.IsDisc && _rotation == 0 &&
+                string.IsNullOrWhiteSpace((AspectRatioComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString());
+            var nativeAttempted = false;
+            await PlayerCommandAsync(() => success = (!nativeAttempted && TrySaveWindowsAsfSnapshot(source, path, originalPresentation)) ||
+                    _mediaPlayer.TakeSnapshot(0, path, 0, 0),
+                player => { nativeAttempted = true; player.SaveSnapshot(path, subtitles); success = true; });
             if (_isClosing) return;
             ShowNotice(success ? $"Snapshot saved · {fileName}" : "Snapshot is not available for this source");
         }
@@ -1961,7 +2119,8 @@ public partial class MainWindow : Window
         if (e.NewValue > 0) _settings.IsMuted = false;
         var volume = _settings.Volume;
         var muted = _settings.IsMuted;
-        _ = PlayerCommandAsync(() => { _mediaPlayer.Volume = volume; _mediaPlayer.Mute = muted; });
+        _ = PlayerCommandAsync(() => { _mediaPlayer.Volume = volume; _mediaPlayer.Mute = muted; },
+            player => { player.SetVolume(volume); player.SetMuted(muted); });
         UpdateMuteVisual();
         ScheduleSettingsSave();
     }
@@ -1972,7 +2131,7 @@ public partial class MainWindow : Window
     {
         _settings.IsMuted = !_settings.IsMuted;
         var muted = _settings.IsMuted;
-        _ = PlayerCommandAsync(() => _mediaPlayer.Mute = muted);
+        _ = PlayerCommandAsync(() => _mediaPlayer.Mute = muted, player => player.SetMuted(muted));
         UpdateMuteVisual();
         ScheduleSettingsSave();
         ShowNotice(_settings.IsMuted ? "Muted" : $"Volume · {(int)VolumeSlider.Value}%");
@@ -2000,7 +2159,7 @@ public partial class MainWindow : Window
         {
             RateBadge.Text = $"{rate:0.00}×";
         }
-        if (_currentMedia is not null) _ = PlayerCommandAsync(() => _mediaPlayer.SetRate(rate));
+        if (HasCurrentMedia) _ = PlayerCommandAsync(() => _mediaPlayer.SetRate(rate), player => player.SetRate(rate));
     }
 
     private void SelectSpeed(float rate)
@@ -2012,7 +2171,7 @@ public partial class MainWindow : Window
         RateBadge.Text = $"{rate:0.00}×";
     }
 
-    private void AspectRatio_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void AspectRatio_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_mediaPlayer is null || AspectRatioComboBox.SelectedItem is not ComboBoxItem item)
         {
@@ -2020,9 +2179,12 @@ public partial class MainWindow : Window
         }
 
         var ratio = item.Tag?.ToString();
-        if (!_isInitializing) _ = PlayerCommandAsync(() => _mediaPlayer.AspectRatio = string.IsNullOrWhiteSpace(ratio) ? null : ratio);
+        if (!_isInitializing) await PlayerCommandAsync(
+            () => _mediaPlayer.AspectRatio = string.IsNullOrWhiteSpace(ratio) ? null : ratio,
+            WindowsMediaEngine.SupportsAspectRatio(ratio) ? player => player.SetAspectRatio(ratio) : null);
         if (!_isInitializing)
         {
+            if (_windowsPlayer is not null) UpdateNativeSubtitles(PlaybackTime);
             ShowNotice($"Aspect ratio · {item.Content}");
         }
     }
@@ -2036,19 +2198,26 @@ public partial class MainWindow : Window
 
         var position = _lastPlaybackTime;
         _rotation = (_rotation + 90) % 360;
-        await PlayItem(_currentItem, allowResume: false, requestedPosition: position);
+        var rotation = _rotation;
+        if (_windowsPlayer is not null)
+        {
+            // Handoff already opens VLC with the selected transform if Windows fails.
+            await PlayerCommandAsync(() => { }, player => player.SetRotation(rotation));
+            if (_windowsPlayer is not null) UpdateNativeSubtitles(PlaybackTime);
+        }
+        else await PlayItem(_currentItem, allowResume: false, requestedPosition: position);
         ShowNotice(_rotation == 0 ? "Rotation reset" : $"Rotated {_rotation}°");
     }
 
     private void PreviousChapter_Click(object sender, RoutedEventArgs e)
     {
-        _ = PlayerCommandAsync(() => _mediaPlayer.PreviousChapter());
+        _ = NavigateChapterAsync(next: false);
         ShowNotice("Previous chapter");
     }
 
     private void NextChapter_Click(object sender, RoutedEventArgs e)
     {
-        _ = PlayerCommandAsync(() => _mediaPlayer.NextChapter());
+        _ = NavigateChapterAsync(next: true);
         ShowNotice("Next chapter");
     }
 
@@ -2579,6 +2748,8 @@ public partial class MainWindow : Window
     private void TransportLayout_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         var useTwoRows = e.NewSize.Width < 730;
+        if (_transportUsesTwoRows == useTwoRows) return;
+        _transportUsesTwoRows = useTwoRows;
         if (useTwoRows)
         {
             Grid.SetRow(PrimaryTransportPanel, 0);
@@ -2621,7 +2792,7 @@ public partial class MainWindow : Window
         _hasPendingPosition = false;
         var target = Math.Clamp(position, 0, _lastPlaybackLength);
         _lastPlaybackTime = target;
-        _ = PlayerCommandAsync(() => _mediaPlayer.Time = target);
+        _ = PlayerCommandAsync(() => SeekCompatibilityTime(target), player => player.Time = target);
     }
 
     private void SeekBy(long milliseconds)
@@ -2973,6 +3144,7 @@ public partial class MainWindow : Window
         _settings.AutoPlayNext = AutoPlayNextCheckBox.IsChecked == true;
         var hardwareChanged = _settings.HardwareDecoding != (HardwareDecodingCheckBox.IsChecked == true);
         _settings.HardwareDecoding = HardwareDecodingCheckBox.IsChecked == true;
+        _settings.PreferWindowsPlayback = WindowsPlaybackCheckBox.IsChecked == true;
         _settings.AlwaysOnTop = AlwaysOnTopCheckBox.IsChecked == true;
         Topmost = _settings.AlwaysOnTop || _isCompact;
         ScheduleSettingsSave();
@@ -3115,7 +3287,9 @@ public partial class MainWindow : Window
     }
 
     private void SetVideoSurfaceActive(bool active) =>
-        VideoOverlay.Background = active ? Brushes.Transparent : Brushes.Black;
+        // Audio does not repaint the video HWND. Cover it so a prior video's last
+        // frame cannot show through behind native audio captions.
+        VideoOverlay.Background = active && _windowsPlayer is not { HasVideo: false } ? Brushes.Transparent : Brushes.Black;
 
     private Brush FindBrush(string resourceName, Brush fallback) => TryFindResource(resourceName) as Brush ?? fallback;
 

@@ -1,0 +1,161 @@
+diff --git a/modules/video_output/win32/common.c b/modules/video_output/win32/common.c
+index 83812826ccce3b295812def995ef6cfe4d7664b0..2c110d78737efe59a5003dcf7558d38d5ae65ce8 100644
+--- a/modules/video_output/win32/common.c
++++ b/modules/video_output/win32/common.c
+@@ -233,12 +233,7 @@ void UpdateRects(vout_display_t *vd,
+ #if !VLC_WINSTORE_APP
+     if (likely(sys->event)) // internal rendering
+     {
+-        EventThreadUpdateSourceAndPlace(sys->event, source, &place);
+-
+-        if (sys->hvideownd)
+-            SetWindowPos(sys->hvideownd, 0,
+-                place.x, place.y, place.width, place.height,
+-                SWP_NOCOPYBITS | SWP_NOZORDER | SWP_ASYNCWINDOWPOS);
++        EventThreadUpdateSourceAndPlace(sys->event, source, &place_cfg);
+     }
+ #endif
+ 
+@@ -436,11 +431,9 @@ void CommonManage(vout_display_t *vd)
+              * For directdraw, it is still important to call UpdateRects
+              * on a move of the parent window, even if no resize occurred
+              */
+-            SetWindowPos(sys->hwnd, 0, 0, 0,
+-                         rect_parent.right - rect_parent.left,
+-                         rect_parent.bottom - rect_parent.top,
+-                         SWP_NOZORDER);
+-
++            /* UpdateRects posts the latest source/configuration to the window
++             * thread, which reads and applies the current parent bounds. Never
++             * wait for another input queue or enqueue an obsolete parent size. */
+             UpdateRects(vd, NULL, true);
+         }
+     }
+diff --git a/modules/video_output/win32/events.c b/modules/video_output/win32/events.c
+index 049b9d66d4e0c12a16d4099850e2f82625fc0c06..a43edac0cece946c9561ed6ee0a0d914eccc0cf4 100644
+--- a/modules/video_output/win32/events.c
++++ b/modules/video_output/win32/events.c
+@@ -50,6 +50,7 @@
+  * Local prototypes.
+  *****************************************************************************/
+ #define WM_VLC_CHANGE_TEXT  (WM_APP + 1)
++#define WM_VLC_UPDATE_GEOMETRY (WM_APP + 2)
+ 
+ struct event_thread_t
+ {
+@@ -98,6 +99,8 @@ struct event_thread_t
+     HWND hfswnd;
+     video_format_t       source;
+     vout_display_place_t place;
++    vout_display_cfg_t   cfg;
++    UINT                embedded_resize_message;
+ 
+     HICON vlc_icon;
+ 
+@@ -444,12 +447,63 @@ void EventThreadUpdateWindowPosition( event_thread_t *p_event,
+ 
+ void EventThreadUpdateSourceAndPlace( event_thread_t *p_event,
+                                       const video_format_t *p_source,
+-                                      const vout_display_place_t *p_place )
++                                      const vout_display_cfg_t *p_cfg )
+ {
+     vlc_mutex_lock( &p_event->lock );
+     p_event->source = *p_source;
+-    p_event->place  = *p_place;
++    p_event->cfg = *p_cfg;
+     vlc_mutex_unlock( &p_event->lock );
++    PostMessage(p_event->hwnd, WM_VLC_UPDATE_GEOMETRY, 0, 0);
++}
++
++/* All child-window placement happens on their owning thread. Read the latest
++ * parent bounds rather than replaying sizes queued by the video/UI threads.
++ * The renderer still updates its resources through CommonManage/UpdateRects. */
++static void UpdateVideoWindow(event_thread_t *p_event, bool resize_parent)
++{
++    if (!p_event->hvideownd)
++        return;
++
++    RECT client;
++    const UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS;
++    if (resize_parent && p_event->hparent &&
++        GetParent(p_event->hwnd) == p_event->hparent &&
++        GetClientRect(p_event->hparent, &client))
++    {
++        RECT current;
++        if (GetClientRect(p_event->hwnd, &current) &&
++            !EqualRect(&client, &current))
++            SetWindowPos(p_event->hwnd, NULL, 0, 0,
++                         client.right, client.bottom, flags);
++    }
++    if (!GetClientRect(p_event->hwnd, &client) ||
++        client.right <= 0 || client.bottom <= 0)
++        return;
++
++    vlc_mutex_lock(&p_event->lock);
++    video_format_t source = p_event->source;
++    vout_display_cfg_t cfg = p_event->cfg;
++    vlc_mutex_unlock(&p_event->lock);
++    cfg.display.width = client.right;
++    cfg.display.height = client.bottom;
++    vout_display_place_t place;
++    vout_display_PlacePicture(&place, &source, &cfg, false);
++
++    RECT current;
++    POINT origin = {0, 0};
++    if (!GetWindowRect(p_event->hvideownd, &current) ||
++        !ClientToScreen(p_event->hwnd, &origin) ||
++        current.left != origin.x + place.x ||
++        current.top != origin.y + place.y ||
++        current.right - current.left != (LONG)place.width ||
++        current.bottom - current.top != (LONG)place.height)
++        SetWindowPos(p_event->hvideownd, NULL, place.x, place.y,
++                     place.width, place.height, flags);
++
++    /* Mouse coordinates (including DVD menu buttons) use the applied bounds. */
++    vlc_mutex_lock(&p_event->lock);
++    p_event->place = place;
++    vlc_mutex_unlock(&p_event->lock);
+ }
+ 
+ void EventThreadUseOverlay( event_thread_t *p_event, bool b_used )
+@@ -485,7 +539,10 @@ event_thread_t *EventThreadCreate( vout_display_t *vd)
+     p_event->button_pressed = 0;
+     p_event->psz_title = NULL;
+     p_event->source = vd->source;
++    p_event->cfg = *vd->cfg;
++    p_event->embedded_resize_message = RegisterWindowMessageW(L"NOIR.VLC.EmbeddedResize.v1");
+     p_event->hwnd = NULL;
++    p_event->hvideownd = NULL;
+     atomic_init(&p_event->has_moved, false);
+     vout_display_PlacePicture(&p_event->place, &vd->source, vd->cfg, false);
+ 
+@@ -941,6 +998,16 @@ static long FAR PASCAL WinVoutEventProc( HWND hwnd, UINT message,
+     }
+     vout_display_t *vd = p_event->vd;
+ 
++    if (hwnd == p_event->hwnd &&
++        (message == WM_VLC_UPDATE_GEOMETRY ||
++         (p_event->embedded_resize_message &&
++          message == p_event->embedded_resize_message &&
++          (HWND)wParam == p_event->hparent)))
++    {
++        UpdateVideoWindow(p_event, true);
++        return 0;
++    }
++
+ #if 0
+     if( message == WM_SETCURSOR )
+     {
+diff --git a/modules/video_output/win32/events.h b/modules/video_output/win32/events.h
+index 635f75c46ddaaaba4adbb9603abe34fa09e12f04..cedb75478f1b402b886d92a195db2a4a7bbeb559 100644
+--- a/modules/video_output/win32/events.h
++++ b/modules/video_output/win32/events.h
+@@ -57,7 +57,7 @@ void            EventThreadUpdateWindowPosition( event_thread_t *, bool *pb_move
+                                                  int x, int y, unsigned w, unsigned h );
+ void            EventThreadUpdateSourceAndPlace( event_thread_t *p_event,
+                                                  const video_format_t *p_source,
+-                                                 const vout_display_place_t *p_place );
++                                                 const vout_display_cfg_t *p_cfg );
+ void            EventThreadUseOverlay( event_thread_t *, bool b_used );
+ bool            EventThreadGetAndResetHasMoved( event_thread_t * );
+ 

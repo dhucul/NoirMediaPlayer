@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/videolan/vlc.git",
+  "release": "3.0.23",
+  "revision": "79128878ddb2c280bbb6c89c76a46b31a80ade1c",
+  "runtimePackageVersion": "3.0.23.1",
+  "sourceDirectory": "vendor/vlc",
+  "branch": "noir/fixes",
+  "requiredFiles": [
+    "COPYING",
+    "COPYING.LIB",
+    "modules/access/dvdnav.c",
+    "modules/access/dvdread.c",
+    "modules/access/bluray.c",
+    "extras/package/win32/build.sh"
+  ]
+}

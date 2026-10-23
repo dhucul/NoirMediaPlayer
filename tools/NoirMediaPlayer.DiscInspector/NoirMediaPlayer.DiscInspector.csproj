@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Compile the same first-party readers without loading the player or VLC. -->
+    <Compile Include="../../src/NoirMediaPlayer/Services/BluRayPlaylist.cs" Link="BluRayPlaylist.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/BluRayDiscInspection.cs" Link="BluRayDiscInspection.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/NativeChapterMap.cs" Link="NativeChapterMap.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdDiscInspection.cs" Link="DvdDiscInspection.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdTitleMap.cs" Link="DvdTitleMap.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdTitleStream.cs" Link="DvdTitleStream.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdVobSource.cs" Link="DvdVobSource.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdStreamTraversal.cs" Link="DvdStreamTraversal.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdNavigationPacket.cs" Link="DvdNavigationPacket.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdVirtualMachine.cs" Link="DvdVirtualMachine.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdVirtualMachine.Decode.cs" Link="DvdVirtualMachine.Decode.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdNavigationCatalog.cs" Link="DvdNavigationCatalog.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdIfoReader.Navigation.cs" Link="DvdIfoReader.Navigation.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdDomainResolver.cs" Link="DvdDomainResolver.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdDomainResolver.Completion.cs" Link="DvdDomainResolver.Completion.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdCellPlayback.cs" Link="DvdCellPlayback.cs" />
+    <Compile Include="../../src/NoirMediaPlayer/Services/DvdMenuNavigation.cs" Link="DvdMenuNavigation.cs" />
+  </ItemGroup>
+</Project>

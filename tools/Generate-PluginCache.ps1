@@ -29,7 +29,7 @@
     e.g. artifacts\publish\win-x64\libvlc\win-x64.
 
 .PARAMETER Force
-    Rebuild even when plugins.dat is already newer than every plugin.
+    Rebuild even when the runtime and plugin contents match the saved cache.
 #>
 [CmdletBinding()]
 param(
@@ -38,6 +38,15 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Use .NET directly: builds can launch Windows PowerShell from a newer host
+# whose module search path does not expose Get-FileHash.
+function Get-VlcFileHash([string]$Path) {
+    $reader = [IO.File]::OpenRead($Path)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($hasher.ComputeHash($reader)).Replace('-', '') }
+    finally { $hasher.Dispose(); $reader.Dispose() }
+}
 
 if (-not (Test-Path -LiteralPath $LibVlcDirectory)) {
     Write-Host "Plugin cache skipped: '$LibVlcDirectory' does not exist."
@@ -49,6 +58,7 @@ $pluginsDir = Join-Path $libVlcDir 'plugins'
 $core = Join-Path $libVlcDir 'libvlccore.dll'
 $libvlc = Join-Path $libVlcDir 'libvlc.dll'
 $cache = Join-Path $pluginsDir 'plugins.dat'
+$cacheIdentity = Join-Path $libVlcDir 'plugins.noir-cache.json'
 
 foreach ($required in @($pluginsDir, $core, $libvlc)) {
     if (-not (Test-Path -LiteralPath $required)) {
@@ -63,17 +73,23 @@ if ($plugins.Count -eq 0) {
     exit 0
 }
 
-# The cache records every plugin's size and timestamp, so it only has to be rebuilt when a
-# plugin is newer than the cache. Subdirectory timestamps are compared too: a plugin that was
-# excluded from the build is deleted rather than modified, which leaves every surviving file
-# older than the cache but does bump the directory holding it. The plugins root itself is left
-# out of that comparison because writing plugins.dat into it bumps the root every time, which
-# would make the cache look permanently stale.
-if (-not $Force -and (Test-Path -LiteralPath $cache)) {
-    $cacheTime = (Get-Item -LiteralPath $cache).LastWriteTimeUtc
-    $directories = @(Get-ChildItem -LiteralPath $pluginsDir -Recurse -Directory)
-    $newest = (@($plugins) + $directories | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
-    if ($cacheTime -ge $newest) {
+# Compare the actual runtime as well as its plug-ins. A replacement package can
+# carry older timestamps, and a core-only update also invalidates the cache.
+$identityLines = @(@((Get-Item -LiteralPath $core), (Get-Item -LiteralPath $libvlc)) + $plugins |
+    Sort-Object FullName | ForEach-Object {
+        $relative = $_.FullName.Substring($libVlcDir.TrimEnd('\').Length + 1)
+        '{0}|{1}|{2}' -f $relative, $_.LastWriteTimeUtc.Ticks, (Get-VlcFileHash $_.FullName)
+    })
+$identityHasher = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $identity = [BitConverter]::ToString($identityHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes(($identityLines -join "`n")))).Replace('-', '')
+}
+finally { $identityHasher.Dispose() }
+if (-not $Force -and (Test-Path -LiteralPath $cache) -and (Test-Path -LiteralPath $cacheIdentity)) {
+    $saved = $null
+    try { $saved = Get-Content -LiteralPath $cacheIdentity -Raw | ConvertFrom-Json } catch { }
+    if ($saved.Schema -eq 1 -and $saved.RuntimeSHA256 -eq $identity -and
+        $saved.CacheSHA256 -eq (Get-VlcFileHash $cache)) {
         Write-Host ("Plugin cache up to date ({0:N0} plugins)." -f $plugins.Count)
         exit 0
     }
@@ -166,5 +182,7 @@ if ($null -ne $previousWrite -and (Get-Item -LiteralPath $cache).LastWriteTimeUt
 }
 
 $cacheItem = Get-Item -LiteralPath $cache
+[ordered]@{ Schema = 1; RuntimeSHA256 = $identity; CacheSHA256 = (Get-VlcFileHash $cache) } |
+    ConvertTo-Json | Set-Content -LiteralPath $cacheIdentity -Encoding UTF8
 Write-Host ("Plugin cache written: {0} ({1:N0} bytes, {2:N0} plugins)." -f $cache, $cacheItem.Length, $plugins.Count)
 exit 0

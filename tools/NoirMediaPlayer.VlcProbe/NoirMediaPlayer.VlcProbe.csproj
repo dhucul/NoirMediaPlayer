@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Wrapper only: the caller explicitly selects the native runtime. -->
+    <PackageReference Include="LibVLCSharp" Version="3.10.1" />
+    <Compile Include="../../tests/NoirMediaPlayer.Tests/Mp4Fixture.cs" Link="Fixtures/Mp4Fixture.cs" />
+    <Compile Include="../../tests/NoirMediaPlayer.Tests/MpegFixture.cs" Link="Fixtures/MpegFixture.cs" />
+    <Compile Include="../../tests/NoirMediaPlayer.Tests/MatroskaFixture.cs" Link="Fixtures/MatroskaFixture.cs" />
+    <Compile Include="../../tests/NoirMediaPlayer.Tests/AsfFixture.cs" Link="Fixtures/AsfFixture.cs" />
+    <None Include="../Generate-WindowsMpegFixture.ps1" Link="Generate-WindowsMpegFixture.ps1" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

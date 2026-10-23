@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "environment": "MINGW64",
+  "target": "x86_64-w64-mingw32",
+  "directory": "artifacts/vlc-toolchain",
+  "base": {
+    "url": "https://repo.msys2.org/distrib/x86_64/msys2-base-x86_64-20260927.tar.xz",
+    "sha256": "ea2f31a0b6ade63914ce441ffb022f0f6aa96982bfefa2326460a26d5fb01322"
+  },
+  "bootstrapRuntime": {
+    "url": "https://mirror.msys2.org/msys/x86_64/msys2-runtime-3.6.11-4-x86_64.pkg.tar.zst",
+    "sha256": "7b1c4b625483ceff9a87f2dfcf3659704dc3da655a0ad414ecb7d9175e7d3ba0",
+    "minimumVersion": "3.6.11"
+  },
+  "cmake": {
+    "version": "3.31.8",
+    "url": "https://github.com/Kitware/CMake/releases/download/v3.31.8/cmake-3.31.8-windows-x86_64.zip",
+    "sha256": "81aa9964dbabd71fe02e7ec50472fd3ad56138c49944515ece9001efbff8d719",
+    "directory": "helpers/cmake-3.31.8-windows-x86_64"
+  },
+  "packages": [
+    "git", "wget", "bzip2", "file", "unzip", "libtool", "pkgconf",
+    "autoconf", "automake", "texinfo", "yasm", "p7zip", "gettext-devel",
+    "cmake", "zip", "curl", "gperf", "flex", "bison", "python",
+    "python-setuptools", "python-mako", "gcc", "make", "ca-certificates",
+    "nasm", "gnupg", "patch", "help2man", "meson", "ninja", "diffutils",
+    "dos2unix", "mingw-w64-x86_64-gcc", "mingw-w64-x86_64-binutils",
+    "mingw-w64-x86_64-pkgconf", "mingw-w64-x86_64-tools",
+    "mingw-w64-x86_64-python", "mingw-w64-x86_64-python-setuptools",
+    "mingw-w64-x86_64-meson", "mingw-w64-x86_64-ninja",
+    "mingw-w64-x86_64-cmake", "autoconf2.71", "automake1.16"
+  ]
+}

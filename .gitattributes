@@ -1,0 +1,2 @@
+# POSIX shell scripts require LF line endings on Windows checkouts.
+tools/vlc/*.sh text eol=lf

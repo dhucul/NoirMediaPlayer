@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.17)
+project(noir_vlc_toolchain_probe LANGUAGES CXX)
+add_executable(noir-cmake-probe native.cpp)
+target_compile_features(noir-cmake-probe PRIVATE cxx_std_14)
+target_link_options(noir-cmake-probe PRIVATE -static-libgcc -static-libstdc++)

@@ -1,0 +1,82 @@
+diff --git a/contrib/src/gme/rules.mak b/contrib/src/gme/rules.mak
+index 2f02aee8b8407fd5f274688d648d3ad2df8e2309..43898b2b5d10b66ccbc7101aff559236dc6dc226 100644
+--- a/contrib/src/gme/rules.mak
++++ b/contrib/src/gme/rules.mak
+@@ -29,4 +29,9 @@ GME_CONF := -DENABLE_UBSAN=OFF
+ 	$(HOSTVARS) $(CMAKE) $(GME_CONF)
+ 	+$(CMAKEBUILD)
+ 	$(CMAKEINSTALL)
++ifdef HAVE_WIN32
++	# Let VLC's -static-libgcc select the runtime; CMake's implicit list
++	# otherwise forces the shared unwinder into the C plug-in link.
++	sed -i 's/-lgcc_s//g' $(PREFIX)/lib/pkgconfig/libgme.pc
++endif
+ 	touch $@
+diff --git a/contrib/src/gnutls/rules.mak b/contrib/src/gnutls/rules.mak
+index 5616b8f183a7a088bc3fec0f80337d1b702e9561..1a34fb5c03c8b3ca6c0ff04af2ff0647f0c7697f 100644
+--- a/contrib/src/gnutls/rules.mak
++++ b/contrib/src/gnutls/rules.mak
+@@ -65,6 +65,7 @@ GNUTLS_CONF := \
+ 	--disable-doc \
+ 	--disable-tools \
+ 	--disable-tests \
++	--disable-gcc-warnings \
+ 	--with-included-libtasn1 \
+ 	--with-included-unistring
+ 
+diff --git a/contrib/src/libarchive/rules.mak b/contrib/src/libarchive/rules.mak
+index 76ee1c5b9a9b3611904e8138f2b26efe733a8dbc..1ac9005974131a3b9e510aab0c63c092e584991b 100644
+--- a/contrib/src/libarchive/rules.mak
++++ b/contrib/src/libarchive/rules.mak
+@@ -27,6 +27,8 @@ LIBARCHIVE_CONF +=-DENABLE_UNZIP=OFF
+ 
+ ifdef HAVE_WIN32
+ LIBARCHIVE_CONF += -DENABLE_OPENSSL=OFF
++# Match pkg-config's -lz and VLC's static dependency link on MinGW.
++LIBARCHIVE_CONF += -DZLIB_USE_STATIC_LIBS=ON
+ endif
+ 
+ ifdef HAVE_MACOSX
+diff --git a/contrib/src/main.mak b/contrib/src/main.mak
+index a4a930dd5c67d383dfd11226da0514404b730054..4e79f5b39718252bf1fa4c57a7cf2007d94d1fc1 100644
+--- a/contrib/src/main.mak
++++ b/contrib/src/main.mak
+@@ -521,6 +521,10 @@ endif
+ PKGS_FOUND :=
+ include $(SRC)/*/rules.mak
+ 
++# An explicitly requested source build must also supply its dependencies to
++# other recipes, even when a different system version passes need_pkg().
++PKGS_FOUND := $(filter-out $(PKGS_ENABLE),$(PKGS_FOUND))
++
+ ifeq ($(PKGS_DISABLE), all)
+ PKGS :=
+ endif
+diff --git a/contrib/src/regex/rules.mak b/contrib/src/regex/rules.mak
+index 2c02b225a9be5e30d2b799d67ec9adb0a6bf8424..097fb8a059fc7b4b759688565267ba3a6a6d1d64 100644
+--- a/contrib/src/regex/rules.mak
++++ b/contrib/src/regex/rules.mak
+@@ -20,7 +20,7 @@ regex: regex-$(REGEX_VERSION).tar.gz .sum-regex
+ 
+ .regex: regex
+ 	cd $< && $(HOSTVARS) ./configure $(HOSTCONF)
+-	$(MAKE) -C $< subirs=
++	$(MAKE) -C $< subirs= CFLAGS="$(CFLAGS)"
+ 	cd $< && $(AR) rcvu libregex.a regex.o && $(RANLIB) libregex.a
+ 	mkdir -p $(PREFIX)/include/ && cp $</regex.h $(PREFIX)/include/
+ 	mkdir -p $(PREFIX)/lib/ && cp $</libregex.a $(PREFIX)/lib/
+diff --git a/contrib/src/vncclient/rules.mak b/contrib/src/vncclient/rules.mak
+index 4d376c2e83282f56d0d46bd5c7a5d256beeced88..5b599a7850952dc3a55e2f4962d40af080a30370 100644
+--- a/contrib/src/vncclient/rules.mak
++++ b/contrib/src/vncclient/rules.mak
+@@ -18,7 +18,9 @@ $(TARBALLS)/LibVNCServer-$(VNCCLIENT_VERSION).tar.gz:
+ .sum-vncclient: LibVNCServer-$(VNCCLIENT_VERSION).tar.gz
+ 
+ vncclient: LibVNCServer-$(VNCCLIENT_VERSION).tar.gz .sum-vncclient
+-	$(UNPACK)
++	# This web-server-only icon is a dangling symlink in the upstream archive.
++	# MSYS cannot create it; it is unrelated to the client library built here.
++	$(UNPACK) --exclude='*/webclients/novnc/favicon.ico'
+ 	mv libvncserver-LibVNCServer-$(VNCCLIENT_VERSION)  LibVNCServer-$(VNCCLIENT_VERSION)
+ 	$(APPLY) $(SRC)/vncclient/libvncclient-libjpeg-win32.patch
+ 	$(APPLY) $(SRC)/vncclient/rfbproto.patch

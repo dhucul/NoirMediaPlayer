@@ -6,10 +6,13 @@ using System.Reflection;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using PixelFormats = System.Windows.Media.PixelFormats;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using LibVLCSharp.Shared;
 using NoirMediaPlayer.Models;
 using NoirMediaPlayer.Services;
+using NoirMediaPlayer.Controls;
 using Xunit;
 
 namespace NoirMediaPlayer.Tests;
@@ -18,7 +21,7 @@ namespace NoirMediaPlayer.Tests;
 public sealed class PlayerUiCollection;
 
 [Collection("Player UI")]
-public sealed class LogicAuditRegressionTests
+public sealed partial class LogicAuditRegressionTests
 {
     [Fact]
     public async Task PlaybackQueue_DoesNotOvertakeAStopEvenWhenItsWaitTimesOut()
@@ -289,6 +292,453 @@ public sealed class LogicAuditRegressionTests
         Assert.False(second.IsPlaying);
     });
 
+    [Fact]
+    public async Task WindowsNative_VideoAndPausedAspectOverridePreservePosition() => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        var video = CreateVideo(window, "native-video");
+        await Call<bool>(window, "AddItem", video, true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing);
+        await Task.Delay(200);
+        Assert.True(Field<WindowsMediaEngine?>(window, "_windowsPlayer") is not null,
+            Field<string?>(window, "_windowsFailureReason") ?? "Windows playback was not selected.");
+        await Call(window, "TogglePlayPause");
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Paused);
+        Invoke(window, "SeekTo", 3000L);
+        await Until(() => Math.Abs(Field<WindowsMediaEngine>(window, "_windowsPlayer").Time - 3000) < 150);
+        var player = Field<WindowsMediaEngine>(window, "_windowsPlayer");
+        Field<ComboBox>(window, "AspectRatioComboBox").SelectedIndex = 1;
+        await Until(() => Field<PlaybackOperationQueue>(window, "_playbackOperations").IsIdle);
+        Assert.Same(player, Field<WindowsMediaEngine?>(window, "_windowsPlayer"));
+        Assert.InRange(player.PresentationAspectRatio, 1.777, 1.779);
+        Assert.InRange(player.Time, 2900, 3100);
+        Assert.Equal(PlaybackState.Paused, Field<PlaybackState>(window, "_playbackState"));
+        Field<ComboBox>(window, "AspectRatioComboBox").SelectedIndex = 0;
+        await Call<bool>(window, "PlayItem", video, false, 1000L);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing);
+        Assert.NotNull(Field<WindowsMediaEngine?>(window, "_windowsPlayer"));
+    });
+
+    [Fact]
+    public async Task WindowsNative_ReplacementDisposesPreviousSession() => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        var first = CreateWave(window, "native-first", 20);
+        var last = CreateWave(window, "native-last", 20);
+        await Call<bool>(window, "AddItem", first, true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing);
+        var previous = Field<WindowsMediaEngine>(window, "_windowsPlayer");
+        Assert.NotNull(previous);
+        await Call<bool>(window, "AddItem", last, true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing);
+        Assert.Same(last, Field<PlaylistItem>(window, "_currentItem"));
+        Assert.NotNull(Field<WindowsMediaEngine?>(window, "_windowsPlayer"));
+        Assert.False(first.IsPlaying);
+        Assert.Throws<ObjectDisposedException>(() => _ = previous.Time);
+        Invoke(window, "Stop_Click", window, new RoutedEventArgs());
+        await Until(() => Field<PlaybackOperationQueue>(window, "_playbackOperations").IsIdle);
+        Assert.Null(Field<WindowsMediaEngine?>(window, "_windowsPlayer"));
+        Assert.False(last.IsPlaying);
+    });
+
+    [Fact]
+    public async Task WindowsNative_DisablingAudioKeepsNativePlayback() => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        await Call<bool>(window, "AddItem", CreateWave(window, "native-audio-disable", 20), true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing);
+        Assert.NotNull(Field<WindowsMediaEngine?>(window, "_windowsPlayer"));
+        await Call(window, "TogglePlayPause");
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Paused);
+        Invoke(window, "RefreshTrackSelectors");
+        var audio = Field<ComboBox>(window, "AudioTrackComboBox");
+        audio.SelectedItem = audio.Items.OfType<ComboBoxItem>().Single(item => Equals(item.Tag, -1));
+        await Until(() => Field<PlaybackOperationQueue>(window, "_playbackOperations").IsIdle);
+        var player = Field<WindowsMediaEngine?>(window, "_windowsPlayer");
+        Assert.NotNull(player);
+        Assert.DoesNotContain(player.AudioTracks, track => track.Selected);
+        Assert.Equal(PlaybackState.Paused, Field<PlaybackState>(window, "_playbackState"));
+        Invoke(window, "RefreshTrackSelectors");
+        audio.SelectedItem = audio.Items.OfType<ComboBoxItem>().Single(item => item.Tag is WindowsAudioTrack);
+        await Until(() => Field<PlaybackOperationQueue>(window, "_playbackOperations").IsIdle);
+        Assert.Contains(player.AudioTracks, track => track.Selected);
+    });
+
+    [Fact]
+    public async Task WindowsNative_AudioTracksSwitchAndSurviveCompatibilityHandoff() => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        await Call<bool>(window, "AddItem", CreateVideo(window, "native-multi-audio", audioTracks: 2), true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing);
+        var player = Field<WindowsMediaEngine?>(window, "_windowsPlayer");
+        Assert.True(player is not null, Field<string?>(window, "_windowsFailureReason"));
+        Assert.Equal(2, player.AudioTracks.Count);
+        await Call(window, "TogglePlayPause");
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Paused);
+        await Until(() => Field<long>(window, "_lastPlaybackLength") > 3000);
+        Invoke(window, "SeekTo", 3000L);
+        await Until(() => Math.Abs(player.Time - 3000) < 100);
+        Invoke(window, "RefreshTrackSelectors");
+        var audio = Field<ComboBox>(window, "AudioTrackComboBox");
+        audio.SelectedItem = audio.Items.OfType<ComboBoxItem>().Single(item => item.Tag is WindowsAudioTrack { Ordinal: 1 });
+        await Until(() => Field<PlaybackOperationQueue>(window, "_playbackOperations").IsIdle);
+        Assert.Same(player, Field<WindowsMediaEngine?>(window, "_windowsPlayer"));
+        Assert.Equal(1, Assert.Single(player.AudioTracks, track => track.Selected).Ordinal);
+        Assert.Equal(PlaybackState.Paused, Field<PlaybackState>(window, "_playbackState"));
+        Assert.InRange(player.Time, 2900, 3100);
+        Field<ComboBox>(window, "AspectRatioComboBox").SelectedIndex = 1;
+        Assert.True(await Call<bool>(window, "EnsureVlcForFeatureAsync"));
+        await Until(() => Field<WindowsMediaEngine?>(window, "_windowsPlayer") is null &&
+            Field<PlaybackState>(window, "_playbackState") == PlaybackState.Paused &&
+            Field<PlaybackOperationQueue>(window, "_playbackOperations").IsIdle &&
+            Field<int?>(window, "_pendingCompatibilityAudioOrdinal") is null && !Field<bool>(window, "_hasPendingPosition") &&
+            Field<MediaPlayer>(window, "_mediaPlayer").AspectRatio == "16:9");
+        var vlc = Field<MediaPlayer>(window, "_mediaPlayer");
+        Assert.Equal(vlc.AudioTrackDescription.Where(track => track.Id >= 0).ElementAt(1).Id, vlc.AudioTrack);
+        Assert.InRange(vlc.Time, 2700, 3400);
+    });
+
+    [Fact]
+    public async Task WindowsNative_SnapshotUsesSourcePixelsAndKeepsPausedSession() => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        await Call<bool>(window, "AddItem", CreateVideo(window, "native-snapshot"), true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing);
+        await Call(window, "TogglePlayPause");
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Paused);
+        var player = Field<WindowsMediaEngine>(window, "_windowsPlayer");
+        await Until(() => Field<long>(window, "_lastPlaybackLength") > 3000);
+        Invoke(window, "SeekTo", 3000L);
+        await Until(() => Math.Abs(player.Time - 3000) < 100);
+        // Exercise the actual button, including command dispatch, file naming, and encoding.
+        Invoke(window, "Snapshot_Click", window, new RoutedEventArgs());
+        await Until(() => Directory.EnumerateFiles(TestRoot(window), "*.png").Any());
+        Assert.Same(player, Field<WindowsMediaEngine?>(window, "_windowsPlayer"));
+        Assert.Equal(PlaybackState.Paused, Field<PlaybackState>(window, "_playbackState"));
+        Assert.InRange(player.Time, 2900, 3100);
+        var path = Directory.EnumerateFiles(TestRoot(window), "*.png").Single();
+        using var png = File.OpenRead(path);
+        var frame = BitmapDecoder.Create(png, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad).Frames[0];
+        Assert.Equal(320, frame.PixelWidth);
+        Assert.Equal(240, frame.PixelHeight);
+        var bitmap = new FormatConvertedBitmap(frame, PixelFormats.Bgr32, null, 0);
+        var pixels = new byte[320 * 240 * 4];
+        bitmap.CopyPixels(pixels, 320 * 4, 0);
+        var top = (20 * 320 + 20) * 4;
+        var bottom = (220 * 320 + 20) * 4;
+        Assert.True(pixels[top + 1] > 150 && pixels[top + 2] < 80, "Snapshot must capture the green top of the frame at 3 seconds.");
+        Assert.True(pixels[bottom] > 150 && pixels[bottom + 2] < 80, "Snapshot must preserve the blue bottom of the frame.");
+    });
+
+    [Theory]
+    [InlineData(".srt")]
+    [InlineData(".vtt")]
+    public async Task WindowsNative_PlainCaptionsRenderSeekAndAppearInSnapshots(string extension) => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        var item = CreateVideo(window, "native-subtitles");
+        var path = Path.Combine(TestRoot(window), "captions" + extension);
+        File.WriteAllText(path, extension == ".srt"
+            ? "1\n00:00:00,000 --> 00:00:02,000\nFirst caption\n\n2\n00:00:02,000 --> 00:00:08,000\nNative caption\nSecond line\n"
+            : "WEBVTT\n\nfirst\n00:00.000 --> 00:02.000\nFirst caption\n\nsecond\n00:02.000 --> 00:08.000\nNative caption\nSecond line\n");
+        await Call<bool>(window, "AddItem", item, true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing);
+        var player = Field<WindowsMediaEngine>(window, "_windowsPlayer");
+        Assert.True(await Call<bool>(window, "LoadExternalSubtitleAsync", path));
+        Assert.Same(player, Field<WindowsMediaEngine?>(window, "_windowsPlayer"));
+        await Call(window, "TogglePlayPause");
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Paused);
+        await Until(() => Field<long>(window, "_lastPlaybackLength") > 3000);
+        Invoke(window, "SeekTo", 3000L);
+        var presenter = Field<SubtitlePresenter>(window, "NativeSubtitlePresenter");
+        await Until(() => presenter.Text == "Native caption\nSecond line");
+        Assert.InRange(presenter.PictureAspectRatio, 1.33, 1.34);
+        Invoke(window, "Snapshot_Click", window, new RoutedEventArgs());
+        await Until(() => Directory.EnumerateFiles(TestRoot(window), "*.png").Any());
+        Assert.Same(player, Field<WindowsMediaEngine?>(window, "_windowsPlayer"));
+        using var png = File.OpenRead(Directory.EnumerateFiles(TestRoot(window), "*.png").Single());
+        var frame = BitmapDecoder.Create(png, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad).Frames[0];
+        var bitmap = new FormatConvertedBitmap(frame, PixelFormats.Bgr32, null, 0);
+        var pixels = new byte[320 * 240 * 4];
+        bitmap.CopyPixels(pixels, 320 * 4, 0);
+        var white = 0;
+        for (var y = 180; y < 235; y++)
+        for (var x = 10; x < 310; x++)
+        {
+            var offset = (y * 320 + x) * 4;
+            if (pixels[offset] > 180 && pixels[offset + 1] > 180 && pixels[offset + 2] > 180) white++;
+        }
+        Assert.True(white > 20, $"The snapshot should include the active subtitle glyphs over the blue source frame (white pixels: {white}).");
+        Invoke(window, "SeekTo", 1000L);
+        await Until(() => presenter.Text == "First caption");
+        var subtitles = Field<ComboBox>(window, "SubtitleTrackComboBox");
+        subtitles.SelectedIndex = 0;
+        Assert.Equal(string.Empty, presenter.Text);
+        subtitles.SelectedIndex = 1;
+        await Until(() => presenter.Text == "First caption");
+        Invoke(window, "Stop_Click", window, new RoutedEventArgs());
+        Assert.Equal(string.Empty, presenter.Text);
+    });
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task WindowsNative_SubtitleSelectionSurvivesCompatibilityHandoff(bool selected) => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        var item = CreateVideo(window, "native-caption-handoff");
+        var path = Path.Combine(TestRoot(window), "captions.srt");
+        File.WriteAllText(path, "1\n00:00:00,000 --> 00:00:20,000\nRetained caption\n");
+        await Call<bool>(window, "AddItem", item, true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing);
+        Assert.True(await Call<bool>(window, "LoadExternalSubtitleAsync", path));
+        if (!selected) Field<ComboBox>(window, "SubtitleTrackComboBox").SelectedIndex = 0;
+        await Call(window, "TogglePlayPause");
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Paused);
+        await Until(() => Field<long>(window, "_lastPlaybackLength") > 3000);
+        Invoke(window, "SeekTo", 3000L);
+        await Until(() => Math.Abs(Field<WindowsMediaEngine>(window, "_windowsPlayer").Time - 3000) < 100);
+        Field<ComboBox>(window, "AspectRatioComboBox").SelectedIndex = 1;
+        Assert.True(await Call<bool>(window, "EnsureVlcForFeatureAsync"));
+        await Until(() => Field<WindowsMediaEngine?>(window, "_windowsPlayer") is null &&
+            Field<PlaybackState>(window, "_playbackState") == PlaybackState.Paused &&
+            Field<PlaybackOperationQueue>(window, "_playbackOperations").IsIdle &&
+            !Field<bool>(window, "_hasPendingPosition") && Field<MediaPlayer>(window, "_mediaPlayer").AspectRatio == "16:9");
+        var vlc = Field<MediaPlayer>(window, "_mediaPlayer");
+        await Until(() => vlc.SpuDescription.Any(track => track.Id >= 0) && Field<object?>(window, "_pendingCompatibilitySubtitles") is null);
+        Assert.Equal(selected, vlc.Spu >= 0);
+        Assert.InRange(vlc.Time, 2700, 3400);
+        Assert.Equal(string.Empty, Field<SubtitlePresenter>(window, "NativeSubtitlePresenter").Text);
+    });
+
+    [Fact]
+    public async Task WindowsVideoHost_OverlayFollowsResizeMiniFullscreenAndMinimize() => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        var view = Field<PlaybackView>(window, "VideoView");
+        Assert.NotEqual(0, view.WindowHandle);
+        var overlay = (Window)typeof(PlaybackView).GetField("_overlayWindow", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(view)!;
+        var surface = (Window)typeof(PlaybackView).GetField("_videoWindow", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(view)!;
+        Assert.Same(window, overlay.Owner);
+        Assert.Same(window, surface.Owner);
+        Assert.Equal(new System.Windows.Interop.WindowInteropHelper(surface).Handle, RotationGetAncestor(view.WindowHandle, 2));
+        Assert.NotEqual(new System.Windows.Interop.WindowInteropHelper(window).Handle, RotationGetAncestor(view.WindowHandle, 2));
+        Assert.False(overlay.ShowInTaskbar);
+        Assert.False(overlay.ShowActivated);
+        Assert.False(surface.ShowInTaskbar);
+        Assert.False(surface.ShowActivated);
+        bool Aligned()
+        {
+            if (!overlay.IsVisible || !surface.IsVisible || view.ActualWidth <= 0) return false;
+            var videoPoint = view.PointToScreen(new Point());
+            var overlayPoint = overlay.PointToScreen(new Point());
+            if (!RotationGetWindowRect(view.WindowHandle, out var native)) return false;
+            return Math.Abs(videoPoint.X - native.Left) < 2 && Math.Abs(videoPoint.Y - native.Top) < 2 &&
+                Math.Abs(videoPoint.X - overlayPoint.X) < 2 && Math.Abs(videoPoint.Y - overlayPoint.Y) < 2 &&
+                Math.Abs(view.ActualWidth - overlay.ActualWidth) < 2 && Math.Abs(view.ActualHeight - overlay.ActualHeight) < 2;
+        }
+        await Until(Aligned);
+        window.Width = 1100;
+        window.Height = 680;
+        await Until(Aligned);
+        Invoke(window, "ToggleCompact");
+        await Until(() => view.ActualWidth < 600 && Aligned());
+        Invoke(window, "ToggleFullscreen");
+        await Until(Aligned);
+        window.WindowState = WindowState.Minimized;
+        await Until(() => !overlay.IsVisible && !surface.IsVisible);
+        window.WindowState = WindowState.Normal;
+        await Until(Aligned);
+    });
+
+    [Fact]
+    public async Task WindowsNative_FontAttributesFallBackWithoutDroppingLoadedCaptions() => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        var plain = Path.Combine(TestRoot(window), "plain.srt");
+        var styled = Path.Combine(TestRoot(window), "styled.srt");
+        File.WriteAllText(plain, "1\n00:00:00,000 --> 00:00:20,000\nPlain\n");
+        File.WriteAllText(styled, "1\n00:00:00,000 --> 00:00:20,000\n<font color=\"#FF0000\" face=\"Arial\">Font attributes</font>\n");
+        await Call<bool>(window, "AddItem", CreateVideo(window, "native-styled"), true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing);
+        Assert.True(await Call<bool>(window, "LoadExternalSubtitleAsync", plain));
+        Assert.True(await Call<bool>(window, "LoadExternalSubtitleAsync", styled));
+        Assert.Null(Field<WindowsMediaEngine?>(window, "_windowsPlayer"));
+        var vlc = Field<MediaPlayer>(window, "_mediaPlayer");
+        await Until(() => vlc.SpuDescription.Count(track => track.Id >= 0) == 2);
+        await Until(() => vlc.Spu == vlc.SpuDescription.Last(track => track.Id >= 0).Id);
+    });
+
+    [Fact]
+    public async Task WindowsNative_MatroskaAudioPlaysNativelyAndCaptionsKeepVlcSupport() => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        var plain = Path.Combine(TestRoot(window), "native-audio.mkv");
+        var captioned = Path.Combine(TestRoot(window), "native-captioned.mkv");
+        MatroskaFixture.Write(plain, subtitles: false);
+        MatroskaFixture.Write(captioned, subtitles: true, subtitleText: "{\\an7}Positioned captions");
+        await Call<bool>(window, "AddItem", MediaSourceService.CreateFileItem(plain), true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing);
+        Assert.True(Field<WindowsMediaEngine?>(window, "_windowsPlayer") is not null, Field<string?>(window, "_windowsFailureReason"));
+        await Call<bool>(window, "AddItem", MediaSourceService.CreateFileItem(captioned), true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing && Field<WindowsMediaEngine?>(window, "_windowsPlayer") is null);
+        await Until(() => Field<MediaPlayer>(window, "_mediaPlayer").SpuDescription.Any(track => track.Id >= 0));
+        Assert.NotNull(Field<string?>(window, "_windowsFailureReason"));
+    });
+
+    [Fact]
+    public async Task WindowsNative_HttpAudioPlaysAndSeeksWithoutVlc() => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        var wave = CreateWave(window, "native-http", 20);
+        await using var server = new LoopbackMediaServer(File.ReadAllBytes(wave.Source), ".wav", "audio/wav");
+        using var http = new System.Net.Http.HttpClient(new System.Net.Http.SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(3) };
+        Assert.Equal(new FileInfo(wave.Source).Length, (await http.GetByteArrayAsync(server.Url)).LongLength);
+        var item = new PlaylistItem { Source = server.Url, Title = "Native HTTP", IsNetwork = true };
+        await Call<bool>(window, "AddItem", item, true);
+        try { await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing, timeoutSeconds: 12); }
+        catch (OperationCanceledException)
+        {
+            throw new InvalidOperationException($"HTTP playback: {Field<PlaybackState>(window, "_playbackState")}; requests: {server.Requests}; reason: {Field<string?>(window, "_windowsFailureReason")}");
+        }
+        var player = Field<WindowsMediaEngine?>(window, "_windowsPlayer");
+        Assert.True(player is not null, Field<string?>(window, "_windowsFailureReason"));
+        Assert.Null(Field<Media?>(window, "_currentMedia"));
+        Assert.True(player.IsSeekable);
+        await Call(window, "TogglePlayPause");
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Paused);
+        await Until(() => Field<long>(window, "_lastPlaybackLength") > 3000);
+        Invoke(window, "SeekTo", 3000L);
+        await Until(() => Math.Abs(player.Time - 3000) < 100);
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WindowsNative_UnsupportedSourceAutomaticallyRetriesVlc(bool network) => await WithWindow(async window =>
+    {
+        ShowPlaybackWindow(window);
+        var path = Path.Combine(TestRoot(window), "native-unsupported.avi");
+        using (var stream = File.Create(path))
+        {
+            stream.Write(Encoding.ASCII.GetBytes("YUV4MPEG2 W32 H24 F2:1 Ip A1:1 C420jpeg\n"));
+            for (var i = 0; i < 20; i++)
+            {
+                stream.Write(Encoding.ASCII.GetBytes("FRAME\n"));
+                stream.Write(Enumerable.Repeat((byte)210, 32 * 24).ToArray());
+                stream.Write(Enumerable.Repeat((byte)128, 32 * 24 / 2).ToArray());
+            }
+        }
+        await using var server = network ? new LoopbackMediaServer(File.ReadAllBytes(path), ".avi", "video/x-msvideo") : null;
+        var item = network ? new PlaylistItem { Source = server!.Url, Title = "Unsupported HTTP", IsNetwork = true } : MediaSourceService.CreateFileItem(path);
+        await Call<bool>(window, "AddItem", item, true);
+        await Until(() => Field<PlaybackState>(window, "_playbackState") == PlaybackState.Playing, timeoutSeconds: 12);
+        Assert.Null(Field<WindowsMediaEngine?>(window, "_windowsPlayer"));
+        Assert.NotNull(Field<string?>(window, "_windowsFailureReason"));
+        Assert.NotNull(Field<Media?>(window, "_currentMedia"));
+    });
+
+    private static void ShowPlaybackWindow(MainWindow window)
+    {
+        // Exercise the real HWND renderer without startup imports or changes to user AACS files.
+        var loaded = (RoutedEventHandler)Delegate.CreateDelegate(typeof(RoutedEventHandler), window,
+            typeof(MainWindow).GetMethod("Window_Loaded", BindingFlags.Instance | BindingFlags.NonPublic)!);
+        window.Loaded -= loaded;
+        window.WindowStartupLocation = WindowStartupLocation.Manual;
+        window.Left = window.Top = -10000;
+        window.ShowActivated = false;
+        window.Show();
+        Field<DispatcherTimer>(window, "_uiTimer").Start();
+    }
+
+    private static PlaylistItem CreateVideo(MainWindow window, string name, int audioTracks = 0)
+    {
+        const int width = 320, height = 240, count = 60;
+        byte[] Frame(bool later)
+        {
+            var pixels = new byte[width * height * 3];
+            for (var y = 0; y < height; y++)
+            for (var x = 0; x < width; x++)
+            {
+                var offset = (y * width + x) * 3;
+                pixels[offset] = later ? (byte)(y < height / 2 ? 20 : 200) : (byte)30;
+                pixels[offset + 1] = later ? (byte)(y < height / 2 ? 190 : 30) : (byte)30;
+                pixels[offset + 2] = later ? (byte)25 : (byte)220;
+            }
+            var encoder = new JpegBitmapEncoder { QualityLevel = 90 };
+            encoder.Frames.Add(BitmapFrame.Create(BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgr24, null, pixels, width * 3)));
+            using var jpeg = new MemoryStream();
+            encoder.Save(jpeg);
+            return jpeg.ToArray();
+        }
+        var earlyFrame = Frame(false);
+        var frame = Frame(true);
+        byte[] Data(Action<BinaryWriter> write)
+        {
+            using var buffer = new MemoryStream();
+            using var writer = new BinaryWriter(buffer);
+            write(writer);
+            return buffer.ToArray();
+        }
+        byte[] Chunk(string type, byte[] data) => Data(writer =>
+        {
+            writer.Write(Encoding.ASCII.GetBytes(type)); writer.Write(data.Length); writer.Write(data);
+            if (data.Length % 2 != 0) writer.Write((byte)0);
+        });
+        var avih = Data(writer =>
+        {
+            foreach (var value in new[] { 500000, frame.Length * 2 + audioTracks * 16000, 0, 0x10, count, 0, 1 + audioTracks, frame.Length, width, height, 0, 0, 0, 0 }) writer.Write(value);
+        });
+        var strh = Data(writer =>
+        {
+            writer.Write(Encoding.ASCII.GetBytes("vidsMJPG")); writer.Write(0); writer.Write((short)0); writer.Write((short)0);
+            foreach (var value in new[] { 0, 1, 2, 0, count, frame.Length, -1, 0 }) writer.Write(value);
+            foreach (var value in new short[] { 0, 0, width, height }) writer.Write(value);
+        });
+        var strf = Data(writer =>
+        {
+            writer.Write(40); writer.Write(width); writer.Write(height); writer.Write((short)1); writer.Write((short)24);
+            writer.Write(Encoding.ASCII.GetBytes("MJPG"));
+            foreach (var value in new[] { frame.Length, 0, 0, 0, 0 }) writer.Write(value);
+        });
+        var streams = new List<byte[]> { Chunk("LIST", Encoding.ASCII.GetBytes("strl").Concat(Chunk("strh", strh)).Concat(Chunk("strf", strf)).ToArray()) };
+        for (var track = 0; track < audioTracks; track++)
+        {
+            var audioHeader = Data(writer =>
+            {
+                writer.Write(Encoding.ASCII.GetBytes("auds")); writer.Write(0); writer.Write(0); writer.Write((short)0); writer.Write((short)0);
+                foreach (var value in new[] { 0, 1, 8000, 0, count * 4000, 8000, -1, 2 }) writer.Write(value);
+                foreach (var value in new short[] { 0, 0, 0, 0 }) writer.Write(value);
+            });
+            var audioFormat = Data(writer =>
+            {
+                writer.Write((short)1); writer.Write((short)1); writer.Write(8000); writer.Write(16000);
+                writer.Write((short)2); writer.Write((short)16);
+            });
+            streams.Add(Chunk("LIST", Encoding.ASCII.GetBytes("strl").Concat(Chunk("strh", audioHeader)).Concat(Chunk("strf", audioFormat)).ToArray()));
+        }
+        var header = Chunk("LIST", Encoding.ASCII.GetBytes("hdrl").Concat(Chunk("avih", avih)).Concat(streams.SelectMany(stream => stream)).ToArray());
+        var chunks = new List<(string Type, byte[] Data)>();
+        for (var frameIndex = 0; frameIndex < count; frameIndex++)
+        {
+            chunks.Add(("00dc", frameIndex < 4 ? earlyFrame : frame));
+            for (var track = 0; track < audioTracks; track++) chunks.Add(($"{track + 1:00}wb", new byte[8000]));
+        }
+        var movi = Chunk("LIST", Encoding.ASCII.GetBytes("movi").Concat(chunks.SelectMany(chunk => Chunk(chunk.Type, chunk.Data))).ToArray());
+        var index = Chunk("idx1", Data(writer =>
+        {
+            var offset = 4;
+            foreach (var chunk in chunks)
+            {
+                writer.Write(Encoding.ASCII.GetBytes(chunk.Type)); writer.Write(0x10); writer.Write(offset); writer.Write(chunk.Data.Length);
+                offset += 8 + chunk.Data.Length + chunk.Data.Length % 2;
+            }
+        }));
+        var path = Path.Combine(TestRoot(window), name + ".avi");
+        File.WriteAllBytes(path, Chunk("RIFF", Encoding.ASCII.GetBytes("AVI ").Concat(header).Concat(movi).Concat(index).ToArray()));
+        return MediaSourceService.CreateFileItem(path);
+    }
+
     private static readonly Lazy<Task<Dispatcher>> Ui = new(() =>
     {
         var ready = new TaskCompletionSource<Dispatcher>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -310,19 +760,21 @@ public sealed class LogicAuditRegressionTests
         return ready.Task;
     });
 
-    private static async Task WithWindow(Func<MainWindow, Task> test)
+    private static async Task WithWindow(Func<MainWindow, Task> test, bool hardwareDecoding = true, bool realCompatibilityVideo = false)
     {
         var dispatcher = await Ui.Value.WaitAsync(TimeSpan.FromSeconds(10));
         await dispatcher.InvokeAsync(async () =>
         {
             var root = Path.Combine(Path.GetTempPath(), "NoirAuditTests-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
-            var settings = new PlayerSettings { PlaybackRate = 1.5f, AutoPlayNext = false, RememberPosition = false, SnapshotFolder = root };
+            var settings = new PlayerSettings { HardwareDecoding = hardwareDecoding, PlaybackRate = 1.5f, AutoPlayNext = false, RememberPosition = false, SnapshotFolder = root };
             var prewarm = typeof(StartupPrewarm);
             prewarm.GetField("_settings", BindingFlags.Static | BindingFlags.NonPublic)!.SetValue(null, settings);
             prewarm.GetField("_settingsService", BindingFlags.Static | BindingFlags.NonPublic)!
                 .SetValue(null, new SettingsService(Path.Combine(root, "settings.json")));
-            var lib = new LibVLC("--aout=dummy", "--vout=dummy", "--quiet");
+            var options = new List<string> { "--aout=dummy", realCompatibilityVideo ? "--vout=direct3d11" : "--vout=dummy", "--quiet" };
+            if (!hardwareDecoding) options.Add("--avcodec-hw=none");
+            var lib = new LibVLC(options.ToArray());
             prewarm.GetField("_engineTask", BindingFlags.Static | BindingFlags.NonPublic)!
                 .SetValue(null, Task.FromResult(new PlaybackEngine(lib, new MediaPlayer(lib))));
             var window = new MainWindow();
@@ -333,7 +785,15 @@ public sealed class LogicAuditRegressionTests
                 var lifetime = Field<CancellationTokenSource>(window, "_lifetimeCancellation");
                 if (!lifetime.IsCancellationRequested) lifetime.Cancel();
                 foreach (var name in new[] { "_uiTimer", "_noticeTimer", "_searchDebounceTimer" }) Field<DispatcherTimer>(window, name).Stop();
-                await Call(window, "DisposePlaybackResourcesAsync").WaitAsync(TimeSpan.FromSeconds(5));
+                // VLC's subtitle decoder can wait five seconds for a video output
+                // after an immediate paused seek. Drain it before deleting fixtures;
+                // application shutdown deadlines have their own regression test.
+                await Call(window, "DisposePlaybackResourcesAsync").WaitAsync(TimeSpan.FromSeconds(10));
+                if (window.IsLoaded)
+                {
+                    typeof(MainWindow).GetField("_shutdownComplete", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(window, true);
+                    window.Close();
+                }
                 if (Field<Task?>(window, "_settingsSaveTask") is { } save) await save;
                 var resolvedRoot = Path.GetFullPath(root);
                 Assert.StartsWith(Path.GetFullPath(Path.GetTempPath()), resolvedRoot);
@@ -349,9 +809,9 @@ public sealed class LogicAuditRegressionTests
     private static object? Invoke(MainWindow window, string name, params object[] args) => typeof(MainWindow).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(window, args);
     private static Task Call(MainWindow window, string name, params object[] args) => (Task)Invoke(window, name, args)!;
     private static Task<T> Call<T>(MainWindow window, string name, params object[] args) => (Task<T>)Invoke(window, name, args)!;
-    private static async Task Until(Func<bool> condition)
+    private static async Task Until(Func<bool> condition, int timeoutSeconds = 5)
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
         while (!condition()) await Task.Delay(10, timeout.Token);
     }
 

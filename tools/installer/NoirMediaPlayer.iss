@@ -2,7 +2,9 @@
 #define AppVersion "1.0.6"
 #define AppPublisher "NOIR"
 #define AppExeName "NoirMediaPlayer.exe"
-#define PublishDir "..\..\artifacts\publish\win-x64"
+#ifndef PublishDir
+  #define PublishDir "..\..\artifacts\publish\win-x64"
+#endif
 
 [Setup]
 AppId={{EB62B4CB-2081-4D5A-89C9-5748A10263ED}
@@ -38,6 +40,11 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "libvlc\win-arm64\*,libvlc\win-x86\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+; Plug-ins removed upstream must not survive an in-place VLC upgrade. NOIR is
+; closed by Setup before this runtime-only directory is replaced.
+Type: filesandordirs; Name: "{app}\libvlc\win-x64\plugins"
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"

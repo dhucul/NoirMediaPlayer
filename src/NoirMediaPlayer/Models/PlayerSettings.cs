@@ -13,6 +13,7 @@ public sealed class PlayerSettings
     public bool RememberPosition { get; set; } = true;
     public bool AutoPlayNext { get; set; } = true;
     public bool HardwareDecoding { get; set; } = true;
+    public bool PreferWindowsPlayback { get; set; } = true;
     public bool AlwaysOnTop { get; set; }
     public bool Shuffle { get; set; }
     public string RepeatMode { get; set; } = "Off";

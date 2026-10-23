@@ -1,0 +1,22 @@
+diff --git a/src/misc/image.c b/src/misc/image.c
+index ee51aa01e390ab4416c8fe0f928ea8f349de26d0..505e1fbe2802069cb01b502a54df327203e5e9b8 100644
+--- a/src/misc/image.c
++++ b/src/misc/image.c
+@@ -45,7 +45,6 @@
+ #include <vlc_image.h>
+ #include <vlc_stream.h>
+ #include <vlc_fs.h>
+-#include <vlc_sout.h>
+ #include <libvlc.h>
+ #include <vlc_modules.h>
+ 
+@@ -718,7 +717,8 @@ static encoder_t *CreateEncoder( vlc_object_t *p_this, const video_format_t *fmt
+ {
+     encoder_t *p_enc;
+ 
+-    p_enc = sout_EncoderCreate( p_this );
++    /* Snapshots need image encoding even in builds without stream output. */
++    p_enc = vlc_custom_create( p_this, sizeof( *p_enc ), "encoder" );
+     if( p_enc == NULL )
+         return NULL;
+ 

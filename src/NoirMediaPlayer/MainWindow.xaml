@@ -4,7 +4,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
-        xmlns:vlc="clr-namespace:LibVLCSharp.WPF;assembly=LibVLCSharp.WPF"
+        xmlns:controls="clr-namespace:NoirMediaPlayer.Controls"
         xmlns:models="clr-namespace:NoirMediaPlayer.Models"
         mc:Ignorable="d"
         Title="NOIR — Cinema without clutter"
@@ -292,7 +292,7 @@
 
                     <Border Grid.Row="0" Margin="12,12,12,0" Background="#FF000000" CornerRadius="10" ClipToBounds="True"
                             BorderBrush="#FF171A20" BorderThickness="1">
-                        <vlc:VideoView x:Name="VideoView" Background="#FF000000">
+                        <controls:PlaybackView x:Name="VideoView" Background="#FF000000" SizeChanged="VideoView_SizeChanged">
                             <Grid x:Name="VideoOverlay" Background="#FF000000" IsHitTestVisible="False">
                                 <StackPanel x:Name="EmptyPlayerPanel" VerticalAlignment="Center" HorizontalAlignment="Center">
                                     <Border Width="82" Height="82" CornerRadius="26" Background="#D90D1015" BorderBrush="#FF242A33" BorderThickness="1">
@@ -314,16 +314,18 @@
                                                FontWeight="SemiBold" FontSize="11" />
                                 </Border>
 
+                                <controls:SubtitlePresenter x:Name="NativeSubtitlePresenter" IsHitTestVisible="False" />
+
                                 <Border VerticalAlignment="Bottom" HorizontalAlignment="Left" Margin="16" Background="#B20A0C10"
                                         CornerRadius="6" Padding="9,5">
                                     <StackPanel Orientation="Horizontal">
                                         <Ellipse x:Name="EngineStatusDot" Width="6" Height="6" Fill="#FF5E6672" Margin="0,0,7,0" />
-                                        <TextBlock x:Name="EngineStatusText" Text="LIBVLC READY" Foreground="{StaticResource MutedTextBrush}"
+                                        <TextBlock x:Name="EngineStatusText" Text="READY" Foreground="{StaticResource MutedTextBrush}"
                                                    FontSize="9" FontWeight="Bold" />
                                     </StackPanel>
                                 </Border>
                             </Grid>
-                        </vlc:VideoView>
+                        </controls:PlaybackView>
                     </Border>
 
                     <Border Grid.Row="1" MinHeight="116" Background="#FF080A0D" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="16,10,16,8">
@@ -465,13 +467,17 @@
                                     <TextBlock Text="VIEW" Style="{StaticResource SectionLabel}" Margin="0,0,0,10" />
                                     <TextBlock Text="Aspect ratio" Foreground="{StaticResource MutedTextBrush}" FontSize="10" Margin="0,0,0,4" />
                                     <ComboBox x:Name="AspectRatioComboBox" SelectedIndex="0" SelectionChanged="AspectRatio_SelectionChanged">
-                                        <ComboBoxItem Content="Best fit" Tag="" />
+                                        <ComboBoxItem Content="Original" Tag=""
+                                                      ToolTip="Use the video's original aspect ratio and fit it within the player without stretching or cropping." />
                                         <ComboBoxItem Content="16:9" Tag="16:9" />
                                         <ComboBoxItem Content="16:10" Tag="16:10" />
                                         <ComboBoxItem Content="4:3" Tag="4:3" />
                                         <ComboBoxItem Content="1:1" Tag="1:1" />
                                         <ComboBoxItem Content="21:9" Tag="21:9" />
                                     </ComboBox>
+                                    <TextBlock Text="Original preserves the video's proportions."
+                                               Foreground="{StaticResource MutedTextBrush}" FontSize="10"
+                                               TextWrapping="Wrap" Margin="0,5,0,0" />
                                     <Grid Margin="0,10,0,0">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
@@ -544,6 +550,9 @@
                                   Checked="Setting_Changed" Unchecked="Setting_Changed" />
                         <CheckBox x:Name="HardwareDecodingCheckBox" Content="Hardware-accelerated decoding" Margin="0,0,0,11"
                                   Checked="Setting_Changed" Unchecked="Setting_Changed" />
+                        <CheckBox x:Name="WindowsPlaybackCheckBox" Content="Prefer Windows playback" Margin="0,0,0,11"
+                                  ToolTip="Use Windows for supported local media. VLC preserves compatibility with other formats and disc features. Applies when opening media."
+                                  Checked="Setting_Changed" Unchecked="Setting_Changed" />
                         <CheckBox x:Name="AlwaysOnTopCheckBox" Content="Keep player above other windows" Margin="0,0,0,11"
                                   Checked="Setting_Changed" Unchecked="Setting_Changed" />
                         <Separator Background="{StaticResource LineBrush}" Margin="0,3,0,12" />
@@ -576,7 +585,7 @@
                                 <TextBlock Text="Open snapshot folder" FontSize="10" />
                             </StackPanel>
                         </Button>
-                        <TextBlock Text="LibVLC engine · Keyboard-first controls · Local settings"
+                        <TextBlock Text="Windows playback · VLC compatibility fallback · Local settings"
                                    Foreground="{StaticResource MutedTextBrush}" FontSize="8" TextWrapping="Wrap" Margin="0,12,0,0" />
                     </StackPanel>
                 </Border>

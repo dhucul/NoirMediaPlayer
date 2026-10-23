@@ -3,6 +3,10 @@
 **/obj/
 artifacts/
 
+# Local VLC source has its own Git history. Its pin, setup script and patches
+# are tracked in tools/vlc/ and patches/vlc/ instead of vendoring every file.
+/vendor/vlc/
+
 # Visual Studio / Rider / VS Code
 .vs/
 .idea/
