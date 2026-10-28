@@ -9,6 +9,7 @@ public sealed class PlaybackStateRegressionTests
     [InlineData(0, false)]
     [InlineData(60_000, false)]
     [InlineData(0, true)]
+    [InlineData(60_000, true)]
     public void FallbackAtZero_BecomesReadyWithoutAnImpossibleSeek(long length, bool seekable)
     {
         var window = new MainWindow();
@@ -17,6 +18,7 @@ public sealed class PlaybackStateRegressionTests
         Assert.False(window.PositionPendingForLogic);
         Assert.True(window.PositionDeadlineClearedForLogic);
         Assert.Empty(window.RestoredPositions);
+        Assert.Null(window.Notice);
         Assert.True(PlaybackRestorationPolicy.IsReady(PlaybackState.Playing, false,
             window.PositionPendingForLogic, false, false, null, null));
     }
@@ -87,6 +89,50 @@ public sealed class PlaybackStateRegressionTests
         window.PendingPositionForLogic(24_000, clock);
         window.TickPositionForLogic(0, false);
         Assert.True(window.PositionPendingForLogic);
+    }
+
+    [Fact]
+    public void HandoffPosition_SeeksWithoutAResumeNotice()
+    {
+        var window = new MainWindow();
+        window.PendingPositionForLogic(30_000, new AuditClock());
+        window.TickPositionForLogic(60_000, true);
+        Assert.Equal(new long[] { 30_000 }, window.RestoredPositions);
+        Assert.Null(window.Notice);
+    }
+
+    [Fact]
+    public void BookmarkResume_StillAnnouncesItsPosition()
+    {
+        var window = new MainWindow();
+        window.PendingPositionForLogic(30_000, new AuditClock(), explicitPosition: false);
+        window.TickPositionForLogic(60_000, true);
+        Assert.Equal(new long[] { 30_000 }, window.RestoredPositions);
+        Assert.Contains("Resumed at", window.Notice);
+    }
+
+    [Fact]
+    public async Task PlaybackQueue_ReportsAStalledOperationWithoutSkippingIt()
+    {
+        var queue = new PlaybackOperationQueue();
+        Assert.Null(queue.RunningFor);
+        using var entered = new ManualResetEventSlim();
+        using var unblock = new ManualResetEventSlim();
+        var order = new List<string>();
+        var stuck = queue.Enqueue(() => { entered.Set(); unblock.Wait(); order.Add("stuck"); });
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(3)));
+        try
+        {
+            await Task.Delay(50);
+            Assert.True(queue.RunningFor >= TimeSpan.FromMilliseconds(40));
+            var next = queue.Enqueue(() => order.Add("next"));
+            Assert.False(next.IsCompleted);
+            unblock.Set();
+            await next.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(new[] { "stuck", "next" }, order);
+            Assert.Null(queue.RunningFor);
+        }
+        finally { unblock.Set(); await stuck; }
     }
 
     [Theory]
