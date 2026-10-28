@@ -13,7 +13,7 @@ public partial class MainWindow
     private WindowsMediaEngine? _windowsPlayer;
     private readonly object _windowsSessionSync = new();
     private Task<bool>? _windowsFallbackTask;
-    private bool _pauseAfterStart;
+    private volatile bool _pauseAfterStart;
     private string? _windowsFailureReason;
     private bool _windowsResizeQueued;
     private bool _windowsStartupPending;
@@ -342,6 +342,8 @@ public partial class MainWindow
             if (_playbackState is PlaybackState.Error or PlaybackState.Ended or PlaybackState.Stopped) return false;
             await Task.Delay(25);
         }
+        // Report the timeout instead of silently dropping the requested feature.
+        if (IsCurrentPlayback(generation, item)) ShowNotice("Compatibility playback is not ready · Try the action again");
         return false;
     }
 

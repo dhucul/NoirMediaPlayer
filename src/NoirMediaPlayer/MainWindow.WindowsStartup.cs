@@ -37,6 +37,9 @@ public partial class MainWindow
             player.SetAspectRatio(aspectRatio);
             player.Open(item.Source, volume, muted, rate, contentType, autoPlay: !prepareCaptions);
         }).WaitAsync(_lifetimeCancellation.Token);
-        if (IsCurrentPlayback(generation, item)) StartPlaybackStartupWatchdog(item, generation);
+        // PLAYING or PAUSE can be dispatched before this continuation. Startup is
+        // then complete, and a late watchdog would outlive its cancellation.
+        if (IsCurrentPlayback(generation, item) && _playbackState == PlaybackState.Opening)
+            StartPlaybackStartupWatchdog(item, generation);
     }
 }

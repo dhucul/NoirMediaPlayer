@@ -35,13 +35,17 @@ public partial class MainWindow
             }
             return;
         }
-        var resumeAt = PlaybackResumePolicy.Resolve(_pendingResumePosition, length, _pendingPositionIsExplicit);
+        var explicitPosition = _pendingPositionIsExplicit;
+        var resumeAt = PlaybackResumePolicy.Resolve(_pendingResumePosition, length, explicitPosition);
         ClearPendingPosition();
         if (resumeAt is { } position)
         {
             _lastPlaybackTime = position;
+            // Explicit positions continue an engine handoff, not a saved bookmark.
+            // The new source already starts at zero, and a handoff is not a resume.
+            if (explicitPosition && position == 0) return;
             _ = PlayerCommandAsync(() => RestoreCompatibilityPosition(position), player => player.Time = position);
-            ShowNotice($"Resumed at {FormatTime(position)}");
+            if (!explicitPosition) ShowNotice($"Resumed at {FormatTime(position)}");
         }
         else if (_currentItem is not null)
         {

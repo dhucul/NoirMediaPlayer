@@ -70,7 +70,8 @@ public partial class MainWindow : Window
     private long _lastPlaybackTime;
     private long _lastPlaybackLength;
     private long _playbackIntent;
-    private PlaybackState _playbackState = PlaybackState.Stopped;
+    // Read by playback-worker restoration loops while the dispatcher updates it.
+    private volatile PlaybackState _playbackState = PlaybackState.Stopped;
     private string? _ejectingDriveRoot;
     private bool _refreshMetadata;
     private int _metadataRetries;
@@ -1522,6 +1523,19 @@ public partial class MainWindow : Window
 
     private bool CanReadPlayer => !_isClosing && !_playbackDisposed && _playbackOperations.IsIdle;
 
+    private bool _playbackStallReported;
+
+    // Later commands never overtake a stuck native call, so a hung engine cannot
+    // recover from here. Tell the user once instead of silently freezing.
+    private void ReportPlaybackStall()
+    {
+        var stalled = !_isClosing && !_playbackDisposed &&
+            _playbackOperations.RunningFor > PlaybackOperationQueue.StallThreshold;
+        if (stalled && !_playbackStallReported)
+            ShowNotice("The playback engine is not responding · Restart the player if it does not recover");
+        _playbackStallReported = stalled;
+    }
+
     private static async Task ObserveTaskAsync(Task task)
     {
         try { await task.ConfigureAwait(false); }
@@ -1783,6 +1797,7 @@ public partial class MainWindow : Window
         // DispatcherTimer.Stop does not remove a tick that is already queued, and shutdown keeps
         // pumping the dispatcher while it awaits. Without this guard that stale tick reaches a
         // disposed native player.
+        ReportPlaybackStall();
         if (!CanReadPlayer || _currentItem is null || _playbackState is not (PlaybackState.Playing or PlaybackState.Paused or PlaybackState.Opening))
         {
             return;
