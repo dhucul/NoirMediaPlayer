@@ -2,6 +2,8 @@
 
 NOIR is a modern, keyboard-first DVD, video, audio, and network-stream player for Windows. It is built with WPF on .NET 10, uses Windows Media Foundation for supported local and direct HTTP/HTTPS playback, and retains VLC/AACS as a compatibility fallback during the migration to Windows APIs.
 
+**Mac version:** a native Apple Silicon port is available at [NoirMediaPlayer-Mac](https://github.com/dhucul/NoirMediaPlayer-Mac). Download the disk image from its [latest release](https://github.com/dhucul/NoirMediaPlayer-Mac/releases/latest).
+
 ## What is included
 
 - Sleek black custom-chrome interface using Segoe UI Variable and Segoe Fluent Icons
